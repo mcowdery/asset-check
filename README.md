@@ -61,6 +61,8 @@ node bin/asset-check.mjs sheet library.glb --clip Walk_Loop,Kick   # those clips
 node bin/asset-check.mjs sheet character.glb --anim walk.fbx       # a clip from another file, fitted to the model's skeleton
 node bin/asset-check.mjs sheet character.glb --anim library.glb --clip Walk_Loop --no-model   # just the strips
 node bin/asset-check.mjs check character.glb --anim library.glb --clip Walk_Loop     # the checks alone; exit 2 on a fault
+node bin/asset-check.mjs compare before.glb after.glb              # both, side by side, and what differs
+node bin/asset-check.mjs compare model.glb model.glb --anim old_clips.glb --anim-b new_clips.glb --clip Walk_Loop
 node bin/asset-check.mjs blender                                   # which Blender it uses
 ```
 
@@ -69,6 +71,18 @@ Options: `--out <dir>`, `--frames <n>` (12 a strip), `--size <px>` (512), `--eng
 
 Reads `.glb`, `.gltf`, `.fbx`, `.bvh`, `.obj` and `.blend`. Needs Blender 4.4 or later (tested on 5.2) and Node 18 or later.
 Blender is found from `BLENDER`, then the `PATH`, then the usual install folders.
+
+## Comparing
+
+`compare <a> <b>` runs both (into `a/` and `b/`), puts each sheet they share side by side (`pair_<sheet>.png`, a on the left,
+every picture stamped A or B), and lists what differs: height, triangles, each proportion and each clip's length, pace and
+loop gap where they change by more than 1%, and the faults found in only one of them, matched by their words and counts so a
+measurement shifting a little doesn't count as a new fault. It exits 2 when b has a fault a hasn't.
+
+Its main use is before and after a fix: the fault that was named should be gone and nothing else should have changed. On a
+generated figure whose swollen hands were replaced, it showed the four hand faults gone, the palms 38 to 55% slimmer, and one
+fault new: the new hand hanging 1.6 cm below its cuff, a gap at the wrist. It also compares a new figure with an approved one,
+and two versions of a clip on one model (`--anim-b`).
 
 ## The Claude Code skill
 
@@ -112,4 +126,5 @@ ln -s "<this repo>/skill" ~/.claude/skills/asset-check                          
 
 - Planting the feet sideways too (IK on each leg) when a fitted clip is played on a body of other proportions.
 - A mesh through itself (a hand through the chest); only one mesh through another is checked.
-- Comparing a model or a clip with a reference side by side.
+- Comparing at one scale: each side of a comparison is framed to its own height, so a height difference is in the numbers,
+  not the pictures.

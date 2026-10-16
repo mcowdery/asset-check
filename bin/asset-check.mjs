@@ -6,11 +6,14 @@
 //                            [--engine eevee|cycles] [--front auto|-y|+y|-x|+x] [--model|--no-model] [--no-anims] [--list]
 //                            [--checks-only|--no-checks] [--verbose]
 //   asset-check check <file> [the same]   the checks alone, no pictures (sheet --checks-only)
+//   asset-check compare <a> <b> [the same] [--anim-b clip]   both, their sheets side by side (a on the left), and what
+//                            differs: sizes, proportions, faults found in only one. Before and after a fix, or a new
+//                            figure against an approved one. --anim-b plays another clip file on b (two versions of a clip)
 //   asset-check blender      which Blender it would use
 //
 // Blender is found from BLENDER, then the PATH, then the usual install folders (the newest version). Output goes to --out, or
 // to ./asset-check/<file name>/. Prints the sheets it wrote and the faults the checks found; exits 1 if Blender failed, 2 if
-// a check found a fault.
+// a check found a fault (compare: a fault b has that a hasn't).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, resolve } from 'node:path';
@@ -65,52 +68,170 @@ if (cmd === 'blender') {
   console.log(blender ?? 'no Blender found: set BLENDER to its executable');
   process.exit(blender ? 0 : 1);
 }
-if (cmd !== 'sheet' && cmd !== 'check') usage(1);
+if (!['sheet', 'check', 'compare'].includes(cmd)) usage(1);
 
 const opts = parse(rest);
 if (cmd === 'check') opts['checks-only'] = true;
-const file = opts._[0];
-if (!file) usage(1);
-if (!existsSync(file)) {
-  console.error(`asset-check: no such file: ${file}`);
-  process.exit(1);
+const files = opts._.slice(0, cmd === 'compare' ? 2 : 1);
+if (files.length < (cmd === 'compare' ? 2 : 1)) usage(1);
+for (const f of files) {
+  if (!existsSync(f)) {
+    console.error(`asset-check: no such file: ${f}`);
+    process.exit(1);
+  }
 }
 if (!blender) {
   console.error('asset-check: no Blender found: set BLENDER to its executable');
   process.exit(1);
 }
-const out = resolve(opts.out ?? join('asset-check', basename(file, extname(file))));
-const pass = ['--out', out];
-for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples', 'proportions']) if (opts[k] != null) pass.push(`--${k}`, String(opts[k]));
-for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list']) if (opts[k]) pass.push(`--${k}`);
 
-const args = ['-b', '--factory-startup', '--python-exit-code', '1', '--python', SHEET_PY, '--', resolve(file), ...pass];
-const child = spawn(blender, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-const log = [];
-const take = (chunk) => {
-  for (const line of chunk.toString().split(/\r?\n/)) {
-    if (!line) continue;
-    log.push(line);
-    if (opts.verbose) console.log(line);
-    else if (line.startsWith('SHEET ')) console.log(line.slice(6));
-  }
-};
-child.stdout.on('data', take);
-child.stderr.on('data', take);
-child.on('close', (code) => {
-  if (code !== 0) {
-    if (!opts.verbose) console.error(log.filter((l) => !/^(Fra:|\d\d:\d\d:\d\d \| INFO)/.test(l)).slice(-25).join('\n'));
-    console.error(`asset-check: Blender exited with ${code}`);
-    process.exit(1);
-  }
-  if (opts.list) return;
+/** Runs Blender on a script, printing its own lines (those starting with `tag`); resolves when it's done, exits on failure. */
+function blenderRun(script, args, tag) {
+  return new Promise((done) => {
+    const child = spawn(blender, ['-b', '--factory-startup', '--python-exit-code', '1', '--python', script, '--', ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const log = [];
+    const take = (chunk) => {
+      for (const line of chunk.toString().split(/\r?\n/)) {
+        if (!line) continue;
+        log.push(line);
+        if (opts.verbose) console.log(line);
+        else if (line.startsWith(tag)) console.log(line.slice(tag.length));
+      }
+    };
+    child.stdout.on('data', take);
+    child.stderr.on('data', take);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        if (!opts.verbose) console.error(log.filter((l) => !/^(Fra:|\d\d:\d\d:\d\d \| INFO)/.test(l)).slice(-25).join('\n'));
+        console.error(`asset-check: Blender exited with ${code}`);
+        process.exit(1);
+      }
+      done();
+    });
+  });
+}
+
+/** One file through sheet.py into `out`; returns its report (null for --list). */
+async function sheet(file, out, extra = {}) {
+  const o = { ...opts, ...extra };
+  const pass = ['--out', out];
+  for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples', 'proportions', 'label']) if (o[k] != null) pass.push(`--${k}`, String(o[k]));
+  for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list']) if (o[k]) pass.push(`--${k}`);
+  await blenderRun(SHEET_PY, [resolve(file), ...pass], 'SHEET ');
   const reportPath = join(out, 'report.json');
-  if (!existsSync(reportPath)) return;
+  if (o.list || !existsSync(reportPath)) return null;
   const report = JSON.parse(readFileSync(reportPath, 'utf8'));
   writeFileSync(join(out, 'index.html'), page(report));
+  return report;
+}
+
+const faultsOf = (r) => [
+  ...(r.model?.checks?.faults ?? []).map((f) => `model: ${f}`),
+  ...r.clips.flatMap((c) => (c.checks?.faults ?? []).map((f) => `${c.name}: ${f}`)),
+];
+
+if (cmd !== 'compare') {
+  const file = files[0];
+  const out = resolve(opts.out ?? join('asset-check', basename(file, extname(file))));
+  const report = await sheet(file, out);
+  if (report) {
+    console.log(`\n${join(out, 'index.html')}`);
+    if (faultsOf(report).length) process.exitCode = 2;
+  }
+} else {
+  const [fa, fb] = files;
+  const name = (f) => basename(f, extname(f));
+  const out = resolve(opts.out ?? join('asset-check', `${name(fa)}--${name(fb)}`));
+  const same = resolve(fa) === resolve(fb);
+  const la = same ? `A ${basename(opts.anim ?? fa)}` : `A ${basename(fa)}`;
+  const lb = same ? `B ${basename(opts['anim-b'] ?? opts.anim ?? fb)}` : `B ${basename(fb)}`;
+  console.log(`== ${la}`);
+  const ra = await sheet(fa, join(out, 'a'), { label: la });
+  console.log(`== ${lb}`);
+  const rb = await sheet(fb, join(out, 'b'), { label: lb, anim: opts['anim-b'] ?? opts.anim });
+  const pairs = ra.sheets.filter((s) => rb.sheets.includes(s));
+  if (pairs.length) {
+    await blenderRun(
+      join(HERE, '..', 'blender', 'pair.py'),
+      pairs.flatMap((s) => [join(out, `pair_${s}`), join(out, 'a', s), join(out, 'b', s)]),
+      'PAIR ',
+    );
+  }
+  const diff = compareReports(ra, rb);
+  writeFileSync(join(out, 'compare.json'), JSON.stringify({ a: fa, b: fb, sheets: pairs.map((s) => `pair_${s}`), ...diff }, null, 2));
+  writeFileSync(join(out, 'index.html'), comparePage(fa, fb, la, lb, pairs, diff));
+  console.log('\nWhat differs (a → b):');
+  for (const line of diff.lines) console.log(`  ${line}`);
+  if (diff.onlyB.length) console.log(`\nFound in b only:\n${diff.onlyB.map((f) => `  ${f}`).join('\n')}`);
+  if (diff.onlyA.length) console.log(`\nFound in a only (gone in b):\n${diff.onlyA.map((f) => `  ${f}`).join('\n')}`);
   console.log(`\n${join(out, 'index.html')}`);
-  if (report.model?.checks?.faults?.length || report.clips.some((c) => c.checks?.faults?.length)) process.exitCode = 2;
-});
+  if (diff.onlyB.length) process.exitCode = 2;
+}
+
+/** What differs between two runs: sizes and proportions (changes over 1%), clips in one only, faults in one only. */
+function compareReports(a, b) {
+  const lines = [];
+  const ma = a.model ?? {}, mb = b.model ?? {};
+  const num = (label, x, y, fmt = (v) => v) => {
+    if (x == null || y == null) return;
+    const change = x ? (y - x) / Math.abs(x) : y ? 1 : 0;
+    if (Math.abs(change) > 0.01) lines.push(`${label}: ${fmt(x)} → ${fmt(y)} (${change > 0 ? '+' : ''}${(change * 100).toFixed(1)}%)`);
+  };
+  num('height', ma.height, mb.height);
+  num('triangles', ma.triangles, mb.triangles);
+  num('joints', ma.joints, mb.joints);
+  const pa = ma.checks?.proportions ?? {}, pb = mb.checks?.proportions ?? {};
+  for (const k of new Set([...Object.keys(pa), ...Object.keys(pb)])) num(k.replace(/_/g, ' '), pa[k], pb[k], (v) => `${(v * 100).toFixed(1)}%`);
+  const ca = new Map(a.clips.map((c) => [c.name, c])), cb = new Map(b.clips.map((c) => [c.name, c]));
+  for (const [n, c] of ca) {
+    const d = cb.get(n);
+    if (!d) {
+      lines.push(`clip ${n}: in a only`);
+      continue;
+    }
+    num(`${n} duration`, c.duration, d.duration);
+    num(`${n} pace`, c.checks?.pace, d.checks?.pace);
+    num(`${n} loop gap`, c.checks?.loop_gap, d.checks?.loop_gap);
+  }
+  for (const n of cb.keys()) if (!ca.has(n)) lines.push(`clip ${n}: in b only`);
+  if (!lines.length) lines.push('nothing measured differs by more than 1%');
+  // a fault's measurements move when anything does: match faults by their words and counts (a piece's vertices, its
+  // height to the percent), with measurements, angles and frame counts taken out
+  const key = (f) =>
+    f
+      .replace(/\(\d+ of \d+ frames\)|\d+ frames/g, '# frames')
+      .replace(/-?\d+°/g, '#°')
+      .replace(/-?\d+\.\d+(e-?\d+)?/g, '#');
+  const fa = faultsOf(a), fb = faultsOf(b);
+  const ka = new Set(fa.map(key)), kb = new Set(fb.map(key));
+  return { lines, onlyA: fa.filter((f) => !kb.has(key(f))), onlyB: fb.filter((f) => !ka.has(key(f))), both: fb.filter((f) => ka.has(key(f))) };
+}
+
+function comparePage(fa, fb, la, lb, pairs, diff) {
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const list = (title, items, cls) => (items.length ? `<h2>${title}</h2><ul class="${cls}">${items.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>` : '');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare · asset-check</title>
+<style>
+:root { color-scheme: dark; --bg: #121315; --fg: #e4e2de; --dim: #8d8b87; --warn: #e0a85c; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+h1 { font-size: 18px; margin: 0 0 8px; } h2 { font-size: 15px; margin: 22px 0 6px; }
+.dim { color: var(--dim); } .warn { color: var(--warn); } .ok { color: #8fc79a; } ul { padding-left: 20px; margin: 0; }
+img { display: block; max-width: 100%; margin: 0 0 10px; border-radius: 3px; }
+</style></head><body>
+<h1>${esc(la)} <span class="dim">against</span> ${esc(lb)}</h1>
+<p class="dim">a: ${esc(resolve(fa))}<br>b: ${esc(resolve(fb))} · <a href="a/index.html">a's page</a> · <a href="b/index.html">b's page</a></p>
+<h2>What differs (a → b)</h2><ul>${diff.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>
+${list('Found in b only', diff.onlyB, 'warn')}
+${list('Found in a only (gone in b)', diff.onlyA, 'ok')}
+${list('Found in both', diff.both, 'dim')}
+${pairs.map((s) => `<h2>${esc(s)}</h2><a href="pair_${esc(s)}"><img src="pair_${esc(s)}" alt="${esc(s)}, a left, b right"></a>`).join('\n')}
+</body></html>
+`;
+}
 
 function modelChecks(k, esc) {
   if (!k) return '';

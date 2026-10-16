@@ -907,7 +907,7 @@ def place_ortho(direction, u, v, cu, cv, span, along, size):
 def render(name, label, size):
     r = SC.render
     if hasattr(r, 'stamp_note_text'):
-        r.stamp_note_text = label
+        r.stamp_note_text = f'{ARGS["label"]} · {label}' if ARGS.get('label') else label
         r.stamp_font_size = max(11, size // 26)
     path = os.path.join(FRAMES_DIR, name + '.png')
     r.filepath = path
@@ -1614,10 +1614,11 @@ def model_checks():
                                  'at_height': round(float((c[2] - GROUND_Z) / H), 3)})
     floating.sort(key=lambda f: -f['gap'])
     res['floating'] = floating[:40]
-    if floating:
-        where = ', '.join(f'{f["mesh"]} ({f["vertices"]} vertices, {f["gap"]:.3g} off, at {f["at_height"] * 100:.0f}% of the height)'
-                          for f in floating[:3])
-        faults.append(f'{len(floating)} pieces floating off the figure: {where}{" ..." if len(floating) > 3 else ""}')
+    for f in floating[:6]:
+        faults.append(f'a piece of {f["mesh"]} floating {f["gap"]:.3g} off the figure: {f["vertices"]} vertices, '
+                      f'at {f["at_height"] * 100:.0f}% of the height')
+    if len(floating) > 6:
+        faults.append(f'{len(floating) - 6} more pieces floating off the figure (report.json: floating)')
 
     if ARGS.get('proportions', 'human') != 'none' and JOINTS:
         props = proportions(arrs)

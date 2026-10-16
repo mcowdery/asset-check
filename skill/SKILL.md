@@ -16,8 +16,9 @@ PATH, or the usual install folders) and Node 18+. The repository's README has ev
   Don't describe a figure from the code that built it.
 - **After fitting a clip to a character**, and when proposing clips from a library: the checks say which clips have faults
   of their own and which the fitting adds.
-- **When the user reports a fault in how something looks or moves**: reproduce it here first, then fix the named fault and run
-  it again to show it's gone and nothing else broke.
+- **When the user reports a fault in how something looks or moves**: reproduce it here first, then fix the named fault, and
+  `compare` the file from before the fix with the one after: the named fault should be in "found in a only" and nothing
+  should be in "found in b only". Report both lists.
 
 ## Commands
 
@@ -26,6 +27,7 @@ asset-check sheet model.glb --out <dir>                    # model sheets (and e
 asset-check sheet clips.glb --list                         # the clips in a file
 asset-check sheet model.glb --anim clips.glb --clip Walk_Loop,Kick --no-model --out <dir>   # clips fitted to the model
 asset-check check model.glb --anim clips.glb --clip Walk_Loop --out <dir>                   # the checks alone, seconds a clip
+asset-check compare before.glb after.glb --out <dir>       # side by side, what differs, faults new in b (exit 2)
 ```
 
 Give every run an output folder of its own (`--out`), not the default, when other agents may be running it too. A run of a
