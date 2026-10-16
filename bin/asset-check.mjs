@@ -45,7 +45,7 @@ function findBlender() {
 
 function parse(argv) {
   const opts = { _: [] };
-  const bare = new Set(['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list', 'verbose']);
+  const bare = new Set(['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'no-ik', 'list', 'verbose']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) opts._.push(a);
@@ -118,7 +118,7 @@ async function sheet(file, out, extra = {}) {
   const o = { ...opts, ...extra };
   const pass = ['--out', out];
   for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples', 'proportions', 'label', 'look']) if (o[k] != null) pass.push(`--${k}`, String(o[k]));
-  for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list']) if (o[k]) pass.push(`--${k}`);
+  for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'no-ik', 'list']) if (o[k]) pass.push(`--${k}`);
   await blenderRun(SHEET_PY, [resolve(file), ...pass], 'SHEET ');
   const reportPath = join(out, 'report.json');
   if (o.list || !existsSync(reportPath)) return null;

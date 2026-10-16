@@ -51,7 +51,7 @@ def parse_args():
     a = {'file': None, 'out': None, 'anim': None, 'clip': None, 'frames': 12, 'size': 512, 'engine': 'eevee', 'front': 'auto',
          'model': None, 'anims': True, 'strips': True, 'checks': True, 'list': False, 'samples': 24}
     flags = {'--model': ('model', True), '--no-model': ('model', False), '--no-anims': ('anims', False), '--list': ('list', True),
-             '--no-checks': ('checks', False), '--no-plant': ('no-plant', True)}
+             '--no-checks': ('checks', False), '--no-plant': ('no-plant', True), '--no-ik': ('no-ik', True)}
     i = 0
     while i < len(argv):
         k = argv[i]
@@ -512,16 +512,157 @@ class Fit:
             for pb in ARM.pose.bones:
                 pb.matrix_basis = Matrix()
         self.plant = bool(feet) and not ARGS.get('no-plant')
+        self.rec, self.cache, self.shifts, self.last_W = {}, {}, {}, {}
 
-    def pose(self, now=None):
+    # ---- holding the planted feet still (the game's footIK, ported: characterAnims.ts `holdFeet`)
+
+    def legs(self):
+        """Each leg as its three bones, thigh, shin, foot (by name, from the pelvis down), and the clip's foot joint."""
+        out = []
+        for side in 'lr':
+            f = find_joint('foot', side)
+            if not f or f not in self.match:
+                continue
+            chain = []
+            n = f
+            while n and n != self.hips:
+                chain.insert(0, n)
+                n = JOINTS[n]['parent']
+            if n == self.hips and len(chain) == 3:
+                out.append({'chain': chain, 'src': self.match[f]})
+        return out
+
+    def use(self, clip):
+        """Gets a clip ready: with foot IK on, the whole clip is posed once (planted, no IK) to find each leg's steps and
+        what turns reach the held feet; `pose` applies them from then on."""
+        self.rec = {}
+        if not self.plant or ARGS.get('no-ik'):
+            return
+        key = clip['name']
+        if key not in self.cache:
+            self.cache[key] = self.prepare(clip)
+        self.rec = self.cache[key]
+
+    def prepare(self, clip):
+        legs = self.legs()
+        if not legs:
+            return {}
+        s, e = (int(round(x)) for x in clip['range'])
+        frames = list(range(s, e + 1))
+        n = len(frames)
+        dt = 1.0 / FPS
+        mw = ARM.matrix_world
+        base = {}  # frame -> per leg (down, hip, knee, ankle, W thigh/shin/foot), and the pelvis' W and the shift
+        for i, f in enumerate(frames):
+            SC.frame_set(f)
+            self.rec = {}
+            self.pose(record=True)
+            row = []
+            for leg in legs:
+                th, ca, fo = leg['chain']
+                sp = self.src.now(leg['src']).to_translation()
+                up = sp.z - self.sP0[leg['src']].z
+                row.append({'down': math.exp(-max(up, 0.0) / self.reach),
+                            'hip': mw @ ARM.pose.bones[th].head, 'knee': mw @ ARM.pose.bones[ca].head,
+                            'ankle': mw @ ARM.pose.bones[fo].head, 'W': [self.last_W[b].copy() for b in leg['chain']]})
+            base[f] = row
+        # the ground's speed under the feet: the planted feet's common speed
+        vs = []
+        for li in range(len(legs)):
+            for i in range(n - 1):
+                a, b = base[frames[i]][li], base[frames[i + 1]][li]
+                if a['down'] >= 0.7 and b['down'] >= 0.7:
+                    vs.append(((b['ankle'] - a['ankle']) / dt))
+        mid = lambda xs: sorted(xs)[len(xs) // 2] if xs else 0.0  # noqa: E731
+        ground = Vector((mid([v.x for v in vs]), mid([v.y for v in vs]), 0.0))
+        loop = 'loop' in clip['name'].lower()
+        period = n - 1
+        ease = int(round(0.2 * FPS))
+        rec = {f: {'W': {}} for f in frames}
+        for li, leg in enumerate(legs):
+            fr = [base[f][li] for f in frames]
+            steps = []
+            i = 0
+            while i < n:
+                if fr[i]['down'] <= 0.5:
+                    i += 1
+                    continue
+                j = i
+                while j + 1 < n and fr[j + 1]['down'] > 0.5:
+                    j += 1
+                anchor = 0 if i == 0 else (n - 1 if j == n - 1 else (i + j) // 2)
+                if j > i:
+                    steps.append((i, j, anchor))
+                i = j + 1
+            shift = [None] * n
+            for a, b, m in steps:
+                for i in range(a, b + 1):
+                    d = fr[m]['ankle'] + ground * ((i - m) * dt) - fr[i]['ankle']
+                    shift[i] = Vector((d.x, d.y, 0.0))
+
+            def at(j):
+                return shift[((j % period) + period) % period] if loop else (shift[j] if 0 <= j < n else None)
+            for k, (a, end, m) in enumerate(steps):
+                nxt = steps[k + 1][0] if k + 1 < len(steps) else (steps[0][0] + period if loop else None)
+                if nxt is not None:
+                    p0, p1 = shift[end], at(nxt)
+                    span = nxt - end
+                    cap = max((p1 - p0).length, 1e-9)
+                    m0 = (p0 - at(end - 1)) * span if at(end - 1) is not None else Vector()
+                    m1 = (at(nxt + 1) - p1) * span if at(nxt + 1) is not None else Vector()
+                    m0 = m0 * (cap / m0.length) if m0.length > cap else m0
+                    m1 = m1 * (cap / m1.length) if m1.length > cap else m1
+                    for j in range(end + 1, nxt):
+                        t = (j - end) / span
+                        h00, h10, h01, h11 = 2 * t**3 - 3 * t**2 + 1, t**3 - 2 * t**2 + t, -2 * t**3 + 3 * t**2, t**3 - t**2
+                        shift[j % period if loop else j] = p0 * h00 + m0 * h10 + p1 * h01 + m1 * h11
+                else:
+                    for j in range(end + 1, min(n, end + 1 + ease)):
+                        shift[j] = shift[end] * (1 - (j - end) / ease)
+            if steps and not loop:
+                start = steps[0][0]
+                for j in range(max(0, start - ease), start):
+                    shift[j] = shift[start] * (1 - (start - j) / ease)
+            if loop and shift[0] is not None:
+                shift[period] = shift[0].copy()
+            for i, f in enumerate(frames):
+                if shift[i] is None or shift[i].length_squared < 1e-10:
+                    continue
+                r = fr[i]
+                hip, knee, ankle = r['hip'], r['knee'], r['ankle']
+                goal = ankle + shift[i]
+                l1, l2 = (knee - hip).length, (ankle - knee).length
+                to = goal - hip
+                d = min(max(to.length, abs(l1 - l2) + 1e-4), l1 + l2 - 1e-4)
+                to = to.normalized()
+                pole = (knee - hip) - to * (knee - hip).dot(to)
+                if pole.length_squared < 1e-10:
+                    continue
+                pole.normalize()
+                c = (l1 * l1 + d * d - l2 * l2) / (2 * l1 * d)
+                new_knee = hip + to * (l1 * c) + pole * (l1 * math.sqrt(max(0.0, 1 - c * c)))
+                swing = (knee - hip).rotation_difference(new_knee - hip)
+                th_w, sh_w, ft_w = r['W'][0], r['W'][1], r['W'][2]
+                shin_was = (swing @ (ankle - knee)).normalized()
+                turn = shin_was.rotation_difference((hip + to * d) - new_knee)
+                th, ca, fo = leg['chain']
+                rec[f]['W'][th] = swing @ th_w
+                rec[f]['W'][ca] = turn @ swing @ sh_w
+                rec[f]['W'][fo] = ft_w
+        return rec
+
+    def pose(self, now=None, record=False):
         now = now or self.src.now
         bones = ARM.data.bones
         W, P = {}, {}
+        over = self.rec.get(SC.frame_current, {}).get('W', {}) if getattr(self, 'rec', None) and not record else {}
         for n in self.order:
             b = bones[n]
             p = b.parent.name if b.parent else None
             s = self.match.get(n)
-            if s:
+            if n in over:
+                W[n] = over[n]
+            elif s:
                 W[n] = now(s).decompose()[1] @ self.fit[n]
             elif p:
                 W[n] = W[p] @ (self.tQ0[p].inverted() @ self.tQ0[n])
@@ -553,7 +694,13 @@ class Fit:
                 num += (want - mw @ P[f].to_translation()) * w
                 den += w
             shift = self.arm_inv.to_3x3() @ Vector((0, 0, (num / den).z))
+            if record:
+                self.shifts[SC.frame_current] = shift
+            elif over:
+                # (the feet were moved by the foot IK: the hips' height is the one found without it)
+                shift = self.shifts.get(SC.frame_current, shift)
             ARM.pose.bones[self.hips].matrix_basis = hips_base.inverted() @ Matrix.Translation(shift) @ P[self.hips]
+        self.last_W = W
         bpy.context.view_layer.update()
 
 
@@ -578,6 +725,8 @@ def play(clip):
     if ARM:
         ARM.data.pose_position = 'POSE' if clip else 'REST'
     bpy.context.view_layer.update()
+    if FIT and clip:
+        FIT.use(clip)
 
 
 if ARGS['anim']:
@@ -1093,6 +1242,7 @@ LIMITS = {
     'elbow': (-12, 160),
     'sideways': 45,       # a knee or elbow bent more than 25 degrees, its hinge this far off the way it bends at rest
     'crossing': 0.05,     # this much more of a mesh's faces through another's than at rest
+    'self_crossing': 0.10,  # the same for a mesh through itself (looser: a body's folds and the layer under clothes count)
 }
 
 
@@ -1179,6 +1329,15 @@ def overlaps(arrs, polys):
             fa, fb = len({p[0] for p in pairs}), len({p[1] for p in pairs})
             small = min(len(polys[a]), len(polys[b]))
             out[f'{a} × {b}'] = round((fa if len(polys[a]) <= len(polys[b]) else fb) / max(small, 1), 4)
+    # each mesh through itself: faces that cross another that isn't a neighbour (a hand through a chest, a coat's hem
+    # through its own front). Faces sharing a vertex are neighbours and don't count.
+    for n in names:
+        shares = [set(p) for p in polys[n]]
+        hit = set()
+        for i, j in trees[n].overlap(trees[n]):
+            if i < j and not (shares[i] & shares[j]):
+                hit.update((i, j))
+        out[f'{n} (itself)'] = round(len(hit) / max(len(polys[n]), 1), 4)
     return out
 
 
@@ -1212,7 +1371,7 @@ def check_clip(clip):
             m = region_masks(f) if f else {}
             if m:
                 FOOT_MASKS[side] = m
-        if not STICK and len(meshes) > 1:
+        if not STICK and meshes:
             POLYS = {o.name: [tuple(p.vertices) for p in o.data.polygons] for o in meshes}
             REST_OVERLAPS = overlaps(mesh_arrays(), POLYS)
 
@@ -1382,7 +1541,7 @@ def check_clip(clip):
             base = REST_OVERLAPS.get(pair, 0)
             tm, peak = max(seq, key=lambda x: x[1])
             res['crossing'][pair] = {'rest': base, 'max': peak, 'at': tm}
-            if peak - base > LIMITS['crossing']:
+            if peak - base > LIMITS['self_crossing' if pair.endswith('(itself)') else 'crossing']:
                 faults.append(f'{pair}: {peak * 100:.1f}% of the smaller one\'s faces through the other at {tm:.2f}s '
                               f'(at rest {base * 100:.1f}%)')
 
