@@ -61,6 +61,19 @@ Options: `--out <dir>`, `--frames <n>` (12 a strip), `--size <px>` (512), `--eng
 Reads `.glb`, `.gltf`, `.fbx`, `.bvh`, `.obj` and `.blend`. Needs Blender 4.4 or later (tested on 5.2) and Node 18 or later.
 Blender is found from `BLENDER`, then the `PATH`, then the usual install folders.
 
+## The Claude Code skill
+
+`skill/SKILL.md` tells Claude Code sessions when to run this (before calling a model or clip done, after fitting a clip, when
+a fault is reported), how to read the sheets and what each fault means. Link it into the user's skills so every project gets
+it and it stays current with the repository:
+
+```powershell
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\asset-check" -Target "<this repo>\skill"   # Windows
+```
+```sh
+ln -s "<this repo>/skill" ~/.claude/skills/asset-check                                                         # macOS, Linux
+```
+
 ## How it decides things
 
 - **Scale.** Everything is measured from the figure itself: the cameras fit it, the floor's checks are a quarter of its
