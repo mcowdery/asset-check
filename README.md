@@ -30,7 +30,8 @@ that travels more than the figure's height is followed by the camera.
 node bin/asset-check.mjs sheet character.glb                       # the model sheets, and each clip if there are 6 or fewer
 node bin/asset-check.mjs sheet library.glb --list                  # the clips in a file
 node bin/asset-check.mjs sheet library.glb --clip Walk_Loop,Kick   # those clips (by name or part of one); --clip all for every one
-node bin/asset-check.mjs sheet character.glb --anim walk.fbx       # a clip from another file, played on the model's bones by name
+node bin/asset-check.mjs sheet character.glb --anim walk.fbx       # a clip from another file, fitted to the model's skeleton
+node bin/asset-check.mjs sheet character.glb --anim library.glb --clip Walk_Loop --no-model   # just the strips
 node bin/asset-check.mjs blender                                   # which Blender it uses
 ```
 
@@ -49,12 +50,19 @@ Blender is found from `BLENDER`, then the `PATH`, then the usual install folders
 - **Joints by name.** Head, hands, feet and hips are found from bone or node names in the common conventions
   (`mixamorig:LeftHand`, `hand.L`, `hand_l`, `CC_Base_L_Hand`, ...). The close-ups take the vertices weighted to that joint
   and the joints under it.
+- **A clip from another file** (`--anim`). It's fitted to the model's skeleton the way its bones turn in the world: each of
+  the model's bones turns from its rest as far as the clip's bone of the same name turns from the clip's rest. The model's
+  rest is first swung into the clip's rest pose limb by limb (arms, legs, hands and fingers aimed the way the clip's point;
+  feet turned only about the vertical; the trunk, neck, head and collar taken as matching), and the hips' travel is scaled by
+  leg length. So rest poses (T-pose against A-pose), bone rolls and proportions may differ; only the names must match
+  (prefixes like `mixamorig:` aside). The clip can be an armature (FBX, BVH, a skinned glTF) or a glTF of animated nodes
+  with no skin; for the latter the rest pose is read from the file itself. Feet aren't planted, so on a body of other
+  proportions they slide a little. `report.json`'s `fit` says how many bones matched.
 - **Skeletons with no mesh.** A clip file with only bones, or with only animated nodes (how a glTF clip library with no skin
   imports), is drawn as rods and knots that move with it. Its floor is the clip's own lowest point.
 
 ## Not yet
 
-- Playing a node-animated clip (a glTF clip library with no skin) on a skinned model: `--anim` takes armature clips only for
-  now. Fitting needs the clip's rest pose matched to the model's.
+- Planting the feet (IK) when a fitted clip is played on a body of other proportions.
 - Numeric checks: foot slide, joint limits, limb stretch, self-intersection, proportions against a reference.
 - Comparing a model or a clip with a reference side by side.

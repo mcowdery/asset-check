@@ -5,8 +5,8 @@ directly:
   blender -b --factory-startup --python-exit-code 1 --python blender/sheet.py -- <file> --out <dir> [options]
 
   <file>          .glb .gltf .fbx .bvh .obj, or .blend (opened as it is)
-  --anim <file>   a clip file to play on the model, its bones matched to the model's by name (an armature clip: .fbx, .bvh,
-                  or a .glb with a skin)
+  --anim <file>   a clip file to play on the model, fitted to its skeleton (bones matched by name; see Fit): an armature
+                  (.fbx, .bvh, a skinned .glb) or a .glb of animated nodes
   --clip <name>   which clips: all, none, or a name or a part of one; several with commas. Left out: all of them if there
                   are six or fewer, else none (the clips are listed, to pick from)
   --frames <n>    frames in each strip (12)
@@ -34,7 +34,7 @@ import time
 
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Quaternion, Vector
 
 T0 = time.time()
 Z = Vector((0, 0, 1))
@@ -310,18 +310,204 @@ def armature_clips(arm, actions):
     return out
 
 
-def node_clips():
+def node_clips(nodes):
     """A clip of a node-animated skeleton is one action with a slot for each node it moves."""
     out = []
     for act in bpy.data.actions:
         ids = {s.identifier: s for s in getattr(act, 'slots', [])}
-        bind = [(o, act, ids['OB' + o.name]) for o in NODE_RIG if 'OB' + o.name in ids]
+        bind = [(o, act, ids['OB' + o.name]) for o in nodes if 'OB' + o.name in ids]
         if bind:
             out.append({'name': act.name, 'bind': bind, 'range': tuple(act.frame_range)})
     return out
 
 
+def node_rig(objs):
+    """The animated empties of a set of objects and the empties above them."""
+    empties = [o for o in objs if o.type == 'EMPTY']
+    moving = {o for o in empties if is_animated(o)}
+    return [o for o in empties if o in moving or any(c in moving for c in o.children_recursive)]
+
+
 RIG_OBJECTS = [ARM] if ARM else NODE_RIG
+
+
+# ------------------------------------------------------------------------------------------ fitting another file's clip
+
+def plain(name):
+    """A joint's name without a rig's prefix or Blender's .001: 'mixamorig:LeftArm' and 'LeftArm.001' are 'leftarm'."""
+    return re.sub(r'\.\d{3}$', '', name.split(':')[-1]).lower()
+
+
+def gltf_rest(path):
+    """Each node's world matrix at rest, read from the file (Blender's import leaves the nodes posed in a clip), in Blender's
+    axes: the importer turns glTF's +Y up to +Z by conjugating every node's transform with a quarter turn about X."""
+    with open(path, 'rb') as fh:
+        data = fh.read()
+    doc = json.loads(data[20:20 + int.from_bytes(data[12:16], 'little')] if data[:4] == b'glTF' else data)
+    nodes = doc.get('nodes', [])
+    parent = {c: i for i, nd in enumerate(nodes) for c in nd.get('children', [])}
+
+    def local(nd):
+        if 'matrix' in nd:
+            m = nd['matrix']
+            return Matrix([m[0:4], m[4:8], m[8:12], m[12:16]]).transposed()
+        x, y, z, w = nd.get('rotation', (0, 0, 0, 1))
+        sx, sy, sz = nd.get('scale', (1, 1, 1))
+        return (Matrix.Translation(Vector(nd.get('translation', (0, 0, 0)))) @ Quaternion((w, x, y, z)).to_matrix().to_4x4()
+                @ Matrix.Diagonal((sx, sy, sz, 1)))
+
+    def world(i):
+        return world(parent[i]) @ local(nodes[i]) if i in parent else local(nodes[i])
+
+    C = Matrix.Rotation(math.radians(90), 4, 'X')
+    return {plain(nd.get('name', f'node{i}')): C @ world(i) @ C.inverted() for i, nd in enumerate(nodes)}
+
+
+class Source:
+    """A clip's skeleton: its joints by plain name, each one's parent, where it is at rest and where it is now (world)."""
+
+    def __init__(self, objs, path):
+        arms = sorted((o for o in objs if o.type == 'ARMATURE'), key=lambda o: -len(o.data.bones))
+        if arms:
+            self.arm = arms[0]
+            self.objects = [self.arm]
+            bones = self.arm.data.bones
+            self.parent = {plain(b.name): plain(b.parent.name) if b.parent else None for b in bones}
+            self.rest = {plain(b.name): self.arm.matrix_world @ b.matrix_local for b in bones}
+            self.real = {plain(b.name): b.name for b in bones}
+        else:
+            self.arm = None
+            self.objects = node_rig(objs)
+            if not self.objects:
+                raise SystemExit('sheet.py: the clip file has no armature and no animated nodes')
+            if not path.lower().endswith(('.glb', '.gltf')):
+                raise SystemExit('sheet.py: a clip of animated nodes is read from .glb or .gltf only')
+            keep = set(self.objects)
+            self.parent = {plain(o.name): plain(o.parent.name) if o.parent in keep else None for o in self.objects}
+            rest = gltf_rest(path)
+            self.rest = {plain(o.name): rest[plain(o.name)] for o in self.objects if plain(o.name) in rest}
+            self.real = {plain(o.name): o for o in self.objects}
+        self.children = {}
+        for n, p in self.parent.items():
+            if p:
+                self.children.setdefault(p, []).append(n)
+
+    def now(self, n):
+        if self.arm:
+            return self.arm.matrix_world @ self.arm.pose.bones[self.real[n]].matrix
+        return self.real[n].matrix_world
+
+    def clips(self):
+        if self.arm:
+            return armature_clips(self.arm, list(bpy.data.actions))
+        return node_clips(self.objects)
+
+
+LIMB = {'arm', 'upperarm', 'lowerarm', 'forearm', 'thigh', 'calf', 'shin', 'leg', 'upleg', 'upperleg', 'lowerleg', 'knee',
+        'elbow', 'thumb', 'index', 'middle', 'ring', 'pinky', 'finger'}
+
+
+def leg_length(names, children, pos):
+    """Hip to knee to ankle, down the left leg, found by name; None if there's no such chain."""
+    hip = next((n for n in names if side_of(tokens(n)) == 'l' and set(tokens(n)) & {'thigh', 'upleg', 'upperleg'}), None)
+    if not hip or not children.get(hip):
+        return None
+    knee = children[hip][0]
+    if not children.get(knee):
+        return None
+    ankle = children[knee][0]
+    return (pos[knee] - pos[hip]).length + (pos[ankle] - pos[knee]).length
+
+
+class Fit:
+    """Plays a clip made on another skeleton on the model's, the way the bones turn in the world: each of the model's bones
+    turns from its rest as far as the clip's bone of the same name turns from the clip's rest. The model's rest is first swung
+    into the clip's rest pose limb by limb (arms, legs, hands, fingers aimed the way the clip's point; feet turned only about
+    the vertical, so a foot stays as flat as its own shape has it; trunk, neck, head and collar taken as matching: their
+    difference is build, not pose). The hips' travel is scaled by leg length. Rest poses, bone rolls and proportions may all
+    differ; names must match (prefixes like 'mixamorig:' aside). Feet aren't planted: on a body of other proportions they
+    slide a little."""
+
+    def __init__(self, src):
+        self.src = src
+        bones = sorted(ARM.data.bones, key=lambda b: len(b.parent_recursive))
+        self.order = [b.name for b in bones]
+        self.match = {b.name: plain(b.name) for b in bones if plain(b.name) in src.rest}
+        if len(self.match) < 0.3 * len(bones):
+            raise SystemExit(f'sheet.py: only {len(self.match)} of the model\'s {len(bones)} bones are in the clip by name '
+                             f'(clip e.g. {sorted(src.rest)[:5]}, model e.g. {self.order[:5]})')
+        mw = ARM.matrix_world
+        self.arm_inv = mw.inverted()
+        self.arm_rot = mw.to_quaternion()
+        t_rest = {b.name: (mw @ b.matrix_local).decompose() for b in bones}
+        self.tQ0 = {n: d[1] for n, d in t_rest.items()}
+        self.tP0 = {n: d[0] for n, d in t_rest.items()}
+        s_rest = {n: m.decompose() for n, m in src.rest.items()}
+        self.sQ0 = {n: d[1] for n, d in s_rest.items()}
+        self.sP0 = {n: d[0] for n, d in s_rest.items()}
+
+        align = {}
+        for b in bones:
+            n, s = b.name, self.match.get(b.name)
+            if not s:
+                continue
+            t = set(tokens(n))
+            kids = [c.name for c in b.children if c.name in self.match]
+            up = align.get(b.parent.name, Quaternion()) if b.parent else Quaternion()
+
+            def swing(kid, flat=False):
+                a = self.tP0[kid] - self.tP0[n]
+                c = self.sP0[self.match[kid]] - self.sP0[s]
+                if flat:
+                    a.z = c.z = 0
+                return a.rotation_difference(c) if a.length > 1e-6 and c.length > 1e-6 else Quaternion()
+
+            if 'foot' in t:
+                align[n] = swing(kids[0], flat=True) if kids else Quaternion()
+            elif t & {'ball', 'toe', 'toes', 'toebase'}:
+                align[n] = up
+            elif 'hand' in t:
+                mid = next((k for k in kids if 'middle' in tokens(k)), kids[0] if kids else None)
+                align[n] = swing(mid) if mid else up  # (a clip with no fingers: the hand goes with the forearm)
+            elif t & LIMB:
+                align[n] = swing(kids[0]) if len(kids) == 1 else up
+            else:
+                align[n] = Quaternion()
+        self.fit = {n: self.sQ0[s].inverted() @ align[n] @ self.tQ0[n] for n, s in self.match.items()}
+
+        tj = {b.name: [c.name for c in b.children] for b in bones}
+        tl = leg_length(self.order, tj, self.tP0)
+        sl = leg_length(list(src.rest), src.children, self.sP0)
+        self.scale = tl / sl if tl and sl else 1.0
+        hips = [n for n in self.order if n in self.match and set(tokens(n)) & {'pelvis', 'hips', 'hip'} and not side_of(tokens(n))]
+        self.hips = hips[0] if hips else next(n for n in self.order if n in self.match)
+
+    def pose(self):
+        bones = ARM.data.bones
+        W, P = {}, {}
+        for n in self.order:
+            b = bones[n]
+            p = b.parent.name if b.parent else None
+            s = self.match.get(n)
+            if s:
+                W[n] = self.src.now(s).to_quaternion() @ self.fit[n]
+            elif p:
+                W[n] = W[p] @ (self.tQ0[p].inverted() @ self.tQ0[n])
+            else:
+                W[n] = self.tQ0[n]
+            base = P[p] @ (b.parent.matrix_local.inverted() @ b.matrix_local) if p else b.matrix_local.copy()
+            head = base.to_translation()
+            if n == self.hips:
+                hs = self.match[n]
+                moved = self.src.now(hs).to_translation() - self.sP0[hs]
+                head = self.arm_inv @ (self.tP0[n] + moved * self.scale)
+            M = Matrix.Translation(head) @ (self.arm_rot.inverted() @ W[n]).to_matrix().to_4x4()
+            P[n] = M
+            ARM.pose.bones[n].matrix_basis = base.inverted() @ M
+        bpy.context.view_layer.update()
+
+
+FIT = None
 
 
 def play(clip):
@@ -347,24 +533,23 @@ def play(clip):
 if ARGS['anim']:
     if not ARM:
         raise SystemExit('sheet.py: --anim needs a model with an armature')
-    before = set(bpy.data.actions)
-    extra = import_file(os.path.abspath(ARGS['anim']))
-    new_actions = [a for a in bpy.data.actions if a not in before]
-    CLIPS = armature_clips(ARM, new_actions)
-    if not CLIPS:
-        if not any(o.type == 'ARMATURE' for o in extra):
-            raise SystemExit('sheet.py: the clip file animates nodes, not an armature\'s bones; fitting that to a skinned '
-                             'model isn\'t supported yet (render the clip file on its own)')
-        clip_bones = set().union(*(bone_names_in(a) for a in new_actions)) if new_actions else set()
-        raise SystemExit(f'sheet.py: the clip\'s bones don\'t match the model\'s by name '
-                         f'(clip e.g. {sorted(clip_bones)[:4]}, model e.g. {sorted(ARM.data.bones.keys())[:4]})')
+    anim_path = os.path.abspath(ARGS['anim'])
+    model_actions = set(bpy.data.actions)
+    extra = import_file(anim_path)
     for o in extra:
-        bpy.data.objects.remove(o, do_unlink=True)
-    REPORT['anim'] = os.path.abspath(ARGS['anim'])
+        if o.type == 'MESH':
+            o.hide_render = True  # (a clip file that carries its own figure: only its skeleton is wanted)
+    SRC = Source(extra, anim_path)
+    CLIPS = [c for c in SRC.clips() if c['bind'][0][1] not in model_actions]
+    RIG_OBJECTS = SRC.objects + [ARM]
+    FIT = Fit(SRC)
+    REPORT['anim'] = anim_path
+    REPORT['fit'] = {'bones_matched': len(FIT.match), 'bones': len(ARM.data.bones), 'leg_scale': round(FIT.scale, 4),
+                     'hips': FIT.hips}
 elif ARM:
     CLIPS = armature_clips(ARM, list(bpy.data.actions))
 else:
-    CLIPS = node_clips()
+    CLIPS = node_clips(NODE_RIG)
 
 ALL_CLIPS = CLIPS
 want = (ARGS['clip'] or '').strip()
@@ -780,6 +965,8 @@ def safe(name):
 
 def go_to(f):
     SC.frame_set(int(math.floor(f)), subframe=f - math.floor(f))
+    if FIT:
+        FIT.pose()
 
 
 def anim_strips(clip):
