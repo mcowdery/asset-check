@@ -19,10 +19,29 @@ out as a few sheets that can be read at a glance.
 | `anim_<clip>_side.png`, `anim_<clip>_front.png` | Frames of the clip in order, each stamped with its time and frame number, from an orthographic camera |
 | `frames/` | Every picture on its own |
 | `report.json` | What was found: size, triangles, rig, facing, each clip's length, travel and lowest point, and warnings |
-| `index.html` | All of the above on one page |
+| `index.html` | All of the above on one page, with each clip's faults and charts of its feet, knees and elbows |
 
 The strips are orthographic and the floor's checks stay put, so a foot that slides, sinks or floats shows against them. A clip
 that travels more than the figure's height is followed by the camera.
+
+## The checks
+
+Every clip drawn is also measured at every frame (`asset-check check` does only this, in a few seconds a clip, and exits 2
+if it finds a fault). Thresholds are fractions of the figure's height H, so they hold at any scale; they're in `LIMITS` at the
+top of the checks in `blender/sheet.py`. A fault is something to look at in the strips, not a verdict.
+
+| Check | Fault when |
+| --- | --- |
+| Sinking, floating | the body goes below the ground by more than 1.5% of H; the feet never come within 2% of H of it |
+| Foot slide | a planted foot moves more than 3% of H in one step against the ground. For a clip that walks on the spot, the ground is taken to move back under the feet at the walking pace (the median motion of every planted foot), which is reported as `pace` |
+| Knees, elbows | a knee bends backwards more than 8° or folds past 165°; an elbow backwards more than 12° or past 160°; either bends more than 45° off the hinge it has at rest (the plane its rest pose bends in, carried by the upper bone), which on a skinned mesh twists the joint |
+| Pops | a joint jumps more than 5% of H off its path for one frame and comes back (a foot strike or a fist stopping changes speed once and isn't one); fingers carried by a popping hand aren't listed again |
+| Loop gap | a clip named `_Loop` whose last pose is more than 3% of H from its first |
+| Stretch | a bone longer or shorter than at rest by more than 3% |
+| Meshes crossing | one mesh's faces through another's (a coat through trousers, a sleeve through a hip) on more than 5% more of the smaller mesh than at rest |
+
+Comparing a clip on its own skeleton with the same clip fitted to a model (`--anim`) tells faults that are in the clip from
+faults the fitting adds.
 
 ## Usage
 
@@ -32,6 +51,7 @@ node bin/asset-check.mjs sheet library.glb --list                  # the clips i
 node bin/asset-check.mjs sheet library.glb --clip Walk_Loop,Kick   # those clips (by name or part of one); --clip all for every one
 node bin/asset-check.mjs sheet character.glb --anim walk.fbx       # a clip from another file, fitted to the model's skeleton
 node bin/asset-check.mjs sheet character.glb --anim library.glb --clip Walk_Loop --no-model   # just the strips
+node bin/asset-check.mjs check character.glb --anim library.glb --clip Walk_Loop     # the checks alone; exit 2 on a fault
 node bin/asset-check.mjs blender                                   # which Blender it uses
 ```
 
@@ -64,5 +84,6 @@ Blender is found from `BLENDER`, then the `PATH`, then the usual install folders
 ## Not yet
 
 - Planting the feet (IK) when a fitted clip is played on a body of other proportions.
-- Numeric checks: foot slide, joint limits, limb stretch, self-intersection, proportions against a reference.
+- A mesh through itself (a hand through the chest); only one mesh through another is checked.
+- Mesh checks on a model at rest: holes, flipped normals, proportions (hands, head) against a reference.
 - Comparing a model or a clip with a reference side by side.

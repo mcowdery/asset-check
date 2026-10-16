@@ -15,6 +15,7 @@ directly:
   --front <axis>  the way the figure faces: auto (the default: from its feet, else -y), -y, +y, -x, +x
   --model         the model sheets even for a skeleton drawn as sticks; --no-model never; --no-anims no strips
   --list          print the clips and stop
+  --checks-only   measure each clip, draw nothing (no model sheets, no strips); --no-checks draw only
 
 Writes into the out folder: model_lit.png and model_clay.png (six sides each), model_close.png (head, hands, feet, and the
 figure small, as from across a street), anim_<clip>_side.png and anim_<clip>_front.png (the strips), frames/ (every picture on
@@ -45,12 +46,15 @@ Z = Vector((0, 0, 1))
 def parse_args():
     argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
     a = {'file': None, 'out': None, 'anim': None, 'clip': None, 'frames': 12, 'size': 512, 'engine': 'eevee', 'front': 'auto',
-         'model': None, 'anims': True, 'list': False, 'samples': 24}
-    flags = {'--model': ('model', True), '--no-model': ('model', False), '--no-anims': ('anims', False), '--list': ('list', True)}
+         'model': None, 'anims': True, 'strips': True, 'checks': True, 'list': False, 'samples': 24}
+    flags = {'--model': ('model', True), '--no-model': ('model', False), '--no-anims': ('anims', False), '--list': ('list', True),
+             '--no-checks': ('checks', False)}
     i = 0
     while i < len(argv):
         k = argv[i]
-        if k in flags:
+        if k == '--checks-only':
+            a['model'], a['strips'] = False, False
+        elif k in flags:
             a[flags[k][0]] = flags[k][1]
         elif k.startswith('--'):
             a[k[2:]] = argv[i + 1]
@@ -168,6 +172,7 @@ def below(name):
 def tokens(name):
     """'mixamorig:LeftHand' -> ['mixamorig', 'left', 'hand']; 'hand.L' -> ['hand', 'l']; 'CC_Base_L_Foot' -> [..., 'l', 'foot']."""
     name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
+    name = re.sub(r'([A-Za-z])(\d)', r'\1 \2', name)  # 'upperarm01' -> 'upperarm 01'
     return [t.lower() for t in re.split(r'[^A-Za-z0-9]+', name) if t]
 
 
@@ -408,14 +413,20 @@ LIMB = {'arm', 'upperarm', 'lowerarm', 'forearm', 'thigh', 'calf', 'shin', 'leg'
 
 
 def leg_length(names, children, pos):
-    """Hip to knee to ankle, down the left leg, found by name; None if there's no such chain."""
-    hip = next((n for n in names if side_of(tokens(n)) == 'l' and set(tokens(n)) & {'thigh', 'upleg', 'upperleg'}), None)
-    if not hip or not children.get(hip):
+    """Hip to knee to ankle, down the left leg, found by name ('thigh', 'UpLeg', 'leg': the one with the most below it, so
+    Mixamo's LeftUpLeg and not its LeftLeg); None if there's no such chain."""
+    def size(n):
+        return 1 + sum(size(c) for c in children.get(n, []))
+
+    def main(n):
+        return max(children[n], key=size) if children.get(n) else None
+
+    legs = [n for n in names if side_of(tokens(n)) == 'l' and set(tokens(n)) & {'thigh', 'upleg', 'upperleg', 'leg'}]
+    hip = max(legs, key=size) if legs else None
+    knee = main(hip) if hip else None
+    ankle = main(knee) if knee else None
+    if not ankle:
         return None
-    knee = children[hip][0]
-    if not children.get(knee):
-        return None
-    ankle = children[knee][0]
     return (pos[knee] - pos[hip]).length + (pos[ankle] - pos[knee]).length
 
 
@@ -629,7 +640,7 @@ GROUND_Z = float(LO[2])
 
 
 AXES = {'-y': (0, -1, 0), '+y': (0, 1, 0), '-x': (-1, 0, 0), '+x': (1, 0, 0)}
-HIPS = [find_joint(p, s) for p in ('thigh', 'upleg', 'upperleg', 'hip') for s in ('l', 'r')]
+HIPS = [find_joint(p, s) for p in ('thigh', 'upleg', 'upperleg', 'leg', 'hip') for s in ('l', 'r')]
 HIPS = next(((HIPS[i], HIPS[i + 1]) for i in range(0, len(HIPS), 2) if HIPS[i] and HIPS[i + 1]), None)
 
 
@@ -969,7 +980,7 @@ def go_to(f):
         FIT.pose()
 
 
-def anim_strips(clip):
+def anim_strips(clip, draw=True):
     play(clip)
     s, e = (float(x) for x in clip['range'])
     n = max(2, ARGS['frames']) if e > s else 1
@@ -1008,7 +1019,7 @@ def anim_strips(clip):
     size = max(160, ARGS['size'] * 2 // 3)
     cols = 4 if len(frames) > 6 else len(frames)
     stem = safe(clip['name'])
-    for view, az in (('side', 90), ('front', 0)):
+    for view, az in (('side', 90), ('front', 0)) if draw else ():
         d = view_dir(az, 10, front)
         if follow:
             rel = np.concatenate([p - [c[0], c[1], 0] for p, c in zip(poses, centres)])
@@ -1024,6 +1035,321 @@ def anim_strips(clip):
             paths.append(render(f'anim_{stem}_{view}_{i:02d}', f'{view} · t={t:.2f}s · f{f:.1f}', size))
         info['sheets'].append(os.path.basename(tile(paths, cols, f'anim_{stem}_{view}')))
     REPORT['clips'].append(info)
+    return info
+
+
+# ------------------------------------------------------------------------------------------------------------------- checks
+#
+# Measured at every frame of a clip, from the joints and the mesh. Lengths are in the file's units and thresholds are fractions
+# of the figure's height H, so they hold at any scale. A fault is a finding to look at in the strips, not a verdict.
+
+LIMITS = {
+    'contact': 0.02,      # a foot is down when its lowest point is within this of the floor (x H)
+    'slide': 0.03,        # a planted foot sliding further than this in one step (x H)
+    'sink': 0.015,        # the body below the ground by more than this (x H)
+    'pop': 0.05,          # a joint jumping this far off its path in one frame (x H)
+    'loop_gap': 0.03,     # a _Loop clip's last pose this far from its first (x H)
+    'stretch': 0.03,      # a bone longer or shorter than at rest by this fraction
+    'knee': (-8, 165),    # the knee's bend, degrees: below the first it bends backwards, past the second it folds too far
+    'elbow': (-12, 160),
+    'sideways': 45,       # a knee or elbow bent more than 25 degrees, its hinge this far off the way it bends at rest
+    'crossing': 0.05,     # this much more of a mesh's faces through another's than at rest
+}
+
+
+def main_child(n):
+    kids = JOINTS[n]['children']
+    return max(kids, key=lambda c: len(below(c))) if kids else None
+
+
+def limb(side, tops):
+    """A limb's three joints by name: (shoulder or hip, elbow or knee, wrist or ankle), or None."""
+    for p in tops:
+        top = find_joint(p, side)
+        mid = main_child(top) if top else None
+        end = main_child(mid) if mid else None
+        if end:
+            return top, mid, end
+    return None
+
+
+def rest_matrices():
+    """Each joint's world matrix at rest: the armature's bones, or a glTF's nodes as the file has them."""
+    if ARM:
+        return {n: ARM.matrix_world @ ARM.data.bones[n].matrix_local for n in JOINTS}
+    if ARGS['file'].lower().endswith(('.glb', '.gltf')):
+        r = gltf_rest(ARGS['file'])
+        return {n: r[plain(n)] for n in JOINTS if plain(n) in r}
+    return {}
+
+
+def joint_matrix(n):
+    return ARM.matrix_world @ ARM.pose.bones[n].matrix if ARM else JOINTS[n]['obj'].matrix_world
+
+
+def hinges(rest):
+    """Knees and elbows, each with the axis it bends about at rest, kept in the upper bone's own frame so it turns with
+    the limb: a knee bends so the shin goes back, an elbow so the forearm comes forward."""
+    out = []
+    if not rest:
+        return out
+    pos = {n: m.to_translation() for n, m in rest.items()}
+    f = FRONT
+    if HIPS and all(h in pos for h in HIPS):
+        across = pos[HIPS[1]] - pos[HIPS[0]]
+        across.z = 0
+        if across.length > 1e-6:
+            f = Z.cross(across).normalized()
+    for kind, tops, toward in (('knee', ('thigh', 'upleg', 'upperleg', 'leg'), -1), ('elbow', ('upperarm', 'arm'), 1)):
+        for side in 'lr':
+            ch = limb(side, tops)
+            if not ch or not all(c in pos for c in ch):
+                continue
+            a = (pos[ch[1]] - pos[ch[0]]).normalized().cross(f * toward)
+            if a.length < 1e-3:
+                continue
+            out.append({'name': f'{kind}_{side}', 'kind': kind, 'joints': ch,
+                        'axis': rest[ch[0]].decompose()[1].inverted() @ a.normalized()})
+    return out
+
+
+def mesh_arrays():
+    dg = bpy.context.evaluated_depsgraph_get()
+    out = {}
+    for o in meshes:
+        oe = o.evaluated_get(dg)
+        me = oe.to_mesh()
+        a = np.empty(len(me.vertices) * 3, dtype=np.float64)
+        me.vertices.foreach_get('co', a)
+        M = np.array(oe.matrix_world)
+        out[o.name] = a.reshape(-1, 3) @ M[:3, :3].T + M[:3, 3]
+        oe.to_mesh_clear()
+    return out
+
+
+def overlaps(arrs, polys):
+    """For each pair of meshes, the share of the smaller one's faces crossing the other's: cloth through a leg, a sleeve
+    through a hip."""
+    from mathutils.bvhtree import BVHTree
+    trees = {n: BVHTree.FromPolygons(arrs[n].tolist(), polys[n]) for n in polys}
+    names = sorted(trees)
+    out = {}
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            pairs = trees[a].overlap(trees[b])
+            fa, fb = len({p[0] for p in pairs}), len({p[1] for p in pairs})
+            small = min(len(polys[a]), len(polys[b]))
+            out[f'{a} × {b}'] = round((fa if len(polys[a]) <= len(polys[b]) else fb) / max(small, 1), 4)
+    return out
+
+
+def stances(mask):
+    """Runs of True in a list, as (first, last) index pairs."""
+    runs, start = [], None
+    for i, m in enumerate(list(mask) + [False]):
+        if m and start is None:
+            start = i
+        elif not m and start is not None:
+            runs.append((start, i - 1))
+            start = None
+    return runs
+
+
+REST_M = None
+HINGES = []
+FOOT_MASKS = {}
+POLYS = {}
+REST_OVERLAPS = None
+
+
+def check_clip(clip):
+    global REST_M, HINGES, FOOT_MASKS, POLYS, REST_OVERLAPS
+    if REST_M is None:
+        play(None)
+        REST_M = rest_matrices()
+        HINGES = hinges(REST_M)
+        for side in 'lr':
+            f = find_joint('foot', side)
+            m = region_masks(f) if f else {}
+            if m:
+                FOOT_MASKS[side] = m
+        if not STICK and len(meshes) > 1:
+            POLYS = {o.name: [tuple(p.vertices) for p in o.data.polygons] for o in meshes}
+            REST_OVERLAPS = overlaps(mesh_arrays(), POLYS)
+
+    play(clip)
+    s, e = (float(x) for x in clip['range'])
+    n = max(2, int(round(e - s)) + 1)
+    frames = np.linspace(s, e, n)
+    dt = max((frames[1] - frames[0]) / FPS, 1e-6)
+    times = (frames - s) / FPS
+    names = list(JOINTS)
+    every = max(1, n // 40)  # meshes crossing: at most about forty frames
+    J = np.zeros((n, len(names), 3))
+    low = np.zeros(n)
+    feet = {side: [] for side in FOOT_MASKS}
+    bend = {h['name']: np.zeros(n) for h in HINGES}
+    sideways = {h['name']: np.zeros(n) for h in HINGES}
+    crossing = {}
+    for i, f in enumerate(frames):
+        go_to(f)
+        arrs = mesh_arrays()
+        low[i] = min(a[:, 2].min() for a in arrs.values())
+        for side, masks in FOOT_MASKS.items():
+            feet[side].append(np.concatenate([arrs[o][m] for o, m in masks.items() if o in arrs]))
+        mats = {nm: joint_matrix(nm) for nm in names}
+        J[i] = [tuple(mats[nm].to_translation()) for nm in names]
+        for h in HINGES:
+            a0, b0, c0 = (mats[j].to_translation() for j in h['joints'])
+            u, l = (b0 - a0).normalized(), (c0 - b0).normalized()
+            ax = mats[h['joints'][0]].decompose()[1] @ h['axis']
+            c = u.cross(l)
+            bend[h['name']][i] = math.degrees(math.atan2(c.dot(ax), u.dot(l)))
+            sideways[h['name']][i] = math.degrees(math.acos(min(1.0, abs(c.dot(ax)) / c.length))) if c.length > 0.42 else 0.0
+        if POLYS and i % every == 0:
+            for pair, k in overlaps(arrs, POLYS).items():
+                crossing.setdefault(pair, []).append((round(float(times[i]), 3), k))
+
+    faults = []
+    t = lambda i: f'{times[i]:.2f}s'  # noqa: E731
+    res = {'frames_checked': n, 'fps': FPS}
+
+    # the ground: a model stands on its rest pose's floor; a skeleton with no rest of its own on the clip's lowest point
+    ground = float(low.min()) if STICK and not ARM else GROUND_Z
+    sink = ground - low
+    res['lowest'] = round(float(low.min() - ground), 4)
+    deep = int(np.argmax(sink))
+    if sink[deep] > LIMITS['sink'] * H:
+        faults.append(f'sinks {sink[deep]:.3g} below the ground at {t(deep)} '
+                      f'({int((sink > LIMITS["sink"] * H).sum())} of {n} frames)')
+
+    # the feet: down when near the floor; a foot that's down should hold still against the ground, which for a clip made to
+    # walk on the spot moves back under it at the walking pace (the common motion of every planted foot)
+    if feet:
+        floor = min(float(min(p[:, 2].min() for p in pts)) for pts in feet.values())
+        res['feet_floor'] = round(floor - ground, 4)
+        if floor - ground > LIMITS['contact'] * H and not STICK:
+            faults.append(f'never touches the ground: the feet stay {floor - ground:.3g} above it')
+        tol = LIMITS['contact'] * H
+        moves = {side: [None] * n for side in feet}
+        down = {side: [bool(p[:, 2].min() < floor + tol) for p in pts] for side, pts in feet.items()}
+        for side, pts in feet.items():
+            for i in range(n - 1):
+                both = (pts[i][:, 2] < floor + tol) & (pts[i + 1][:, 2] < floor + tol)
+                if both.sum() >= 1:
+                    moves[side][i] = np.median(pts[i + 1][both, :2] - pts[i][both, :2], axis=0) / dt
+        allv = [v for side in moves for v in moves[side] if v is not None]
+        pace = np.median(np.array(allv), axis=0) if len(allv) >= 4 else np.zeros(2)
+        if np.linalg.norm(pace) < 0.03 * H:  # (about 5 cm/s on a person: standing still)
+            pace = np.zeros(2)
+        res['pace'] = round(float(np.linalg.norm(pace)), 4)
+        res['feet'] = {}
+        for side in feet:
+            slide = [float(np.linalg.norm(v - pace)) if v is not None else None for v in moves[side]]
+            steps = []
+            for a, b in stances(down[side]):
+                d = sum(x for x in slide[a:b + 1] if x is not None) * dt
+                steps.append({'from': round(float(times[a]), 3), 'to': round(float(times[b]), 3), 'slide': round(d, 4)})
+                if d > LIMITS['slide'] * H and b > a:
+                    faults.append(f'{side} foot slides {d:.3g} while down, {t(a)} to {t(b)}')
+            res['feet'][side] = {'down_frames': int(sum(down[side])), 'steps': steps,
+                                 'height': [round(float(p[:, 2].min() - floor), 4) for p in feet[side]],
+                                 'slide_speed': [None if x is None else round(x, 4) for x in slide]}
+
+    # knees and elbows
+    res['hinges'] = {}
+    for h in HINGES:
+        lo, hi = LIMITS[h['kind']]
+        b, sw = bend[h['name']], sideways[h['name']]
+        res['hinges'][h['name']] = {'min': round(float(b.min()), 1), 'max': round(float(b.max()), 1),
+                                    'sideways_max': round(float(sw.max()), 1), 'bend': [round(float(x), 1) for x in b],
+                                    'sideways': [round(float(x), 1) for x in sw]}
+        i = int(np.argmin(b))
+        if b[i] < lo:
+            faults.append(f'{h["name"]} bends backwards {-b[i]:.0f}° at {t(i)}')
+        i = int(np.argmax(b))
+        if b[i] > hi:
+            faults.append(f'{h["name"]} folds to {b[i]:.0f}° at {t(i)}')
+        bad = [k for k in range(n) if b[k] > 25 and sw[k] > LIMITS['sideways']]
+        if bad:
+            k = max(bad, key=lambda k: sw[k])
+            faults.append(f'{h["name"]} bends sideways ({sw[k]:.0f}° off its hinge) at {t(k)}, {len(bad)} frames')
+
+    # joints jumping off their path for a frame
+    # (a pop is a frame off the path and back: the change of speed one way, then the other, either side of it; a foot
+    # striking the ground or a fist stopping changes speed once, and isn't one)
+    if n >= 5:
+        D = J[2:] - 2 * J[1:-1] + J[:-2]  # frame 1..n-2
+        d2 = np.linalg.norm(D, axis=2)
+        pops = []
+        for j, nm in enumerate(names):
+            for k in range(1, len(d2) - 1):
+                if (d2[k, j] > LIMITS['pop'] * H and np.dot(D[k - 1, j], D[k, j]) < 0 and np.dot(D[k + 1, j], D[k, j]) < 0
+                        and min(d2[k - 1, j], d2[k + 1, j]) > 0.3 * d2[k, j]):
+                    pops.append((nm, k + 1))
+        # (a hand that pops carries its fingers: keep the highest joint of a chain popping at about the same time)
+        at = {}
+        for nm, k in pops:
+            at.setdefault(nm, set()).add(k)
+
+        def carried(nm, k):
+            p = JOINTS[nm]['parent']
+            while p:
+                if at.get(p, set()) & {k - 1, k, k + 1}:
+                    return True
+                p = JOINTS[p]['parent']
+            return False
+        pops = [(nm, k) for nm, k in pops if not carried(nm, k)]
+        res['pops'] = [{'joint': nm, 'time': round(float(times[k]), 3)} for nm, k in pops]
+        for nm, k in pops[:5]:
+            faults.append(f'{nm} jumps at {t(k)}')
+
+    # a loop's ends
+    hips = FIT.hips if FIT else (next((nm for nm in names if set(tokens(nm)) & {'pelvis', 'hips'}), None) or names[0])
+    hj = names.index(hips)
+    rel = J - J[:, hj:hj + 1]
+    gap = float(max(np.linalg.norm(rel[-1] - rel[0], axis=1).max(), abs(J[-1, hj, 2] - J[0, hj, 2])))
+    res['loop_gap'] = round(gap, 4)
+    if 'loop' in clip['name'].lower() and gap > LIMITS['loop_gap'] * H:
+        faults.append(f'a loop whose last pose is {gap:.3g} from its first')
+
+    # bones stretching
+    if REST_M:
+        worst = (0.0, None, 0)
+        rp = {nm: REST_M[nm].to_translation() for nm in names if nm in REST_M}
+        for j, nm in enumerate(names):
+            p = JOINTS[nm]['parent']
+            if not p or nm not in rp or p not in rp or depth(nm) <= depth(hips):
+                continue  # (the hips and above move by translation: their distance from the root isn't a bone)
+            L0 = (rp[nm] - rp[p]).length
+            if L0 < 0.01 * H:
+                continue
+            ratio = np.linalg.norm(J[:, j] - J[:, names.index(p)], axis=1) / L0 - 1
+            k = int(np.argmax(np.abs(ratio)))
+            if abs(ratio[k]) > abs(worst[0]):
+                worst = (float(ratio[k]), nm, k)
+        res['stretch'] = {'worst': round(worst[0], 4), 'bone': worst[1]}
+        if abs(worst[0]) > LIMITS['stretch']:
+            faults.append(f'{worst[1]} {"stretches" if worst[0] > 0 else "shrinks"} {abs(worst[0]) * 100:.0f}% at {t(worst[2])}')
+
+    # meshes through each other, against how much they already cross at rest
+    if crossing:
+        res['crossing'] = {}
+        for pair, seq in crossing.items():
+            base = REST_OVERLAPS.get(pair, 0)
+            tm, peak = max(seq, key=lambda x: x[1])
+            res['crossing'][pair] = {'rest': base, 'max': peak, 'at': tm}
+            if peak - base > LIMITS['crossing']:
+                faults.append(f'{pair}: {peak * 100:.1f}% of the smaller one\'s faces through the other at {tm:.2f}s '
+                              f'(at rest {base * 100:.1f}%)')
+
+    res['times'] = [round(float(x), 3) for x in times]
+    res['faults'] = faults
+    for f in faults:
+        print(f'SHEET fault {clip["name"]}: {f}')
+    if not faults:
+        print(f'SHEET clip {clip["name"]}: no faults found')
+    return res
 
 
 # --------------------------------------------------------------------------------------------------------------------- run
@@ -1033,7 +1359,9 @@ if ARGS['model'] if ARGS['model'] is not None else not STICK:
 if ARGS['anims']:
     for clip in CLIPS:
         print(f'SHEET clip {clip["name"]}')
-        anim_strips(clip)
+        info = anim_strips(clip, draw=ARGS['strips'])
+        if ARGS['checks']:
+            info['checks'] = check_clip(clip)
 
 REPORT['seconds'] = round(time.time() - T0, 1)
 with open(os.path.join(OUT, 'report.json'), 'w', encoding='utf-8') as fh:
