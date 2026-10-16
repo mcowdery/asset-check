@@ -15,6 +15,7 @@ directly:
   --front <axis>  the way the figure faces: auto (the default: from its feet, else -y), -y, +y, -x, +x
   --model         the model sheets even for a skeleton drawn as sticks; --no-model never; --no-anims no strips
   --list          print the clips and stop
+  --no-plant      fit an --anim clip without planting the feet (see Fit.pose)
   --checks-only   measure each clip, draw nothing (no model sheets, no strips); --no-checks draw only
 
 Writes into the out folder: model_lit.png and model_clay.png (six sides each), model_close.png (head, hands, feet, and the
@@ -48,7 +49,7 @@ def parse_args():
     a = {'file': None, 'out': None, 'anim': None, 'clip': None, 'frames': 12, 'size': 512, 'engine': 'eevee', 'front': 'auto',
          'model': None, 'anims': True, 'strips': True, 'checks': True, 'list': False, 'samples': 24}
     flags = {'--model': ('model', True), '--no-model': ('model', False), '--no-anims': ('anims', False), '--list': ('list', True),
-             '--no-checks': ('checks', False)}
+             '--no-checks': ('checks', False), '--no-plant': ('no-plant', True)}
     i = 0
     while i < len(argv):
         k = argv[i]
@@ -493,7 +494,25 @@ class Fit:
         hips = [n for n in self.order if n in self.match and set(tokens(n)) & {'pelvis', 'hips', 'hip'} and not side_of(tokens(n))]
         self.hips = hips[0] if hips else next(n for n in self.order if n in self.match)
 
-    def pose(self):
+        # The model's legs swung into the clip's rest pose reach lower or higher than they do at the model's own rest (an
+        # A-pose's legs slant out; a T-pose's hang straight down, and a straight leg reaches further), so the hips placed from
+        # the model's rest would sink the feet into the floor or lift them off it. Measured once, with the clip at its rest,
+        # and taken off the hips' height from then on.
+        self.lift = Vector()
+        self.plant = False
+        feet = [f for f in (find_joint('foot', 'l'), find_joint('foot', 'r')) if f and f in self.match]
+        self.feet = feet
+        self.reach = 0.05 * (sl or 1.0)  # how far up a foot is still mostly trusted as the one on the ground
+        if feet:
+            self.pose(now=lambda s: src.rest[s])
+            posed = sum((ARM.matrix_world @ ARM.pose.bones[f].head).z for f in feet) / len(feet)
+            self.lift = Vector((0, 0, sum(self.tP0[f].z for f in feet) / len(feet) - posed))
+            for pb in ARM.pose.bones:
+                pb.matrix_basis = Matrix()
+        self.plant = bool(feet) and not ARGS.get('no-plant')
+
+    def pose(self, now=None):
+        now = now or self.src.now
         bones = ARM.data.bones
         W, P = {}, {}
         for n in self.order:
@@ -501,7 +520,7 @@ class Fit:
             p = b.parent.name if b.parent else None
             s = self.match.get(n)
             if s:
-                W[n] = self.src.now(s).to_quaternion() @ self.fit[n]
+                W[n] = now(s).decompose()[1] @ self.fit[n]
             elif p:
                 W[n] = W[p] @ (self.tQ0[p].inverted() @ self.tQ0[n])
             else:
@@ -510,11 +529,29 @@ class Fit:
             head = base.to_translation()
             if n == self.hips:
                 hs = self.match[n]
-                moved = self.src.now(hs).to_translation() - self.sP0[hs]
-                head = self.arm_inv @ (self.tP0[n] + moved * self.scale)
+                moved = now(hs).to_translation() - self.sP0[hs]
+                head = self.arm_inv @ (self.tP0[n] + moved * self.scale + self.lift)
             M = Matrix.Translation(head) @ (self.arm_rot.inverted() @ W[n]).to_matrix().to_4x4()
             P[n] = M
             ARM.pose.bones[n].matrix_basis = base.inverted() @ M
+            if n == self.hips:
+                hips_base = base
+        if self.plant:
+            # Planting: the same knee angles on legs of other proportions reach higher or lower, so the hips are moved up or
+            # down (and the whole body with them, nothing else changed) to put the feet at the clip's height, scaled; the foot
+            # that's lower in the clip counts most, so the one on the ground holds. Only up and down: moving the body
+            # sideways to hold one foot drags the other, and lurches as the weight passes between them (that needs IK).
+            mw = ARM.matrix_world
+            num, den = Vector(), 0.0
+            for f in self.feet:
+                s = self.match[f]
+                sp = now(s).to_translation()
+                w = math.exp(-max(sp.z - self.sP0[s].z, 0.0) / self.reach)
+                want = self.tP0[f] + (sp - self.sP0[s]) * self.scale
+                num += (want - mw @ P[f].to_translation()) * w
+                den += w
+            shift = self.arm_inv.to_3x3() @ Vector((0, 0, (num / den).z))
+            ARM.pose.bones[self.hips].matrix_basis = hips_base.inverted() @ Matrix.Translation(shift) @ P[self.hips]
         bpy.context.view_layer.update()
 
 
@@ -556,7 +593,7 @@ if ARGS['anim']:
     FIT = Fit(SRC)
     REPORT['anim'] = anim_path
     REPORT['fit'] = {'bones_matched': len(FIT.match), 'bones': len(ARM.data.bones), 'leg_scale': round(FIT.scale, 4),
-                     'hips': FIT.hips}
+                     'hips': FIT.hips, 'feet_planted': FIT.plant, 'hips_raised': round(FIT.lift.z, 4)}
 elif ARM:
     CLIPS = armature_clips(ARM, list(bpy.data.actions))
 else:
@@ -1191,10 +1228,13 @@ def check_clip(clip):
     bend = {h['name']: np.zeros(n) for h in HINGES}
     sideways = {h['name']: np.zeros(n) for h in HINGES}
     crossing = {}
+    lowest_mesh = []
     for i, f in enumerate(frames):
         go_to(f)
         arrs = mesh_arrays()
-        low[i] = min(a[:, 2].min() for a in arrs.values())
+        lows = {o: a[:, 2].min() for o, a in arrs.items()}
+        lowest_mesh.append(min(lows, key=lows.get))
+        low[i] = lows[lowest_mesh[-1]]
         for side, masks in FOOT_MASKS.items():
             feet[side].append(np.concatenate([arrs[o][m] for o, m in masks.items() if o in arrs]))
         mats = {nm: joint_matrix(nm) for nm in names}
@@ -1220,7 +1260,8 @@ def check_clip(clip):
     res['lowest'] = round(float(low.min() - ground), 4)
     deep = int(np.argmax(sink))
     if sink[deep] > LIMITS['sink'] * H:
-        faults.append(f'sinks {sink[deep]:.3g} below the ground at {t(deep)} '
+        what = '' if STICK or len(meshes) == 1 else f' (lowest: {lowest_mesh[deep]})'
+        faults.append(f'sinks {sink[deep]:.3g} below the ground at {t(deep)}{what} '
                       f'({int((sink > LIMITS["sink"] * H).sum())} of {n} frames)')
 
     # the feet: down when near the floor; a foot that's down should hold still against the ground, which for a clip made to

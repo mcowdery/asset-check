@@ -42,7 +42,7 @@ function findBlender() {
 
 function parse(argv) {
   const opts = { _: [] };
-  const bare = new Set(['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'list', 'verbose']);
+  const bare = new Set(['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list', 'verbose']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) opts._.push(a);
@@ -82,7 +82,7 @@ if (!blender) {
 const out = resolve(opts.out ?? join('asset-check', basename(file, extname(file))));
 const pass = ['--out', out];
 for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples']) if (opts[k] != null) pass.push(`--${k}`, String(opts[k]));
-for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'list']) if (opts[k]) pass.push(`--${k}`);
+for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list']) if (opts[k]) pass.push(`--${k}`);
 
 const args = ['-b', '--factory-startup', '--python-exit-code', '1', '--python', SHEET_PY, '--', resolve(file), ...pass];
 const child = spawn(blender, args, { stdio: ['ignore', 'pipe', 'pipe'] });

@@ -32,7 +32,7 @@ top of the checks in `blender/sheet.py`. A fault is something to look at in the 
 
 | Check | Fault when |
 | --- | --- |
-| Sinking, floating | the body goes below the ground by more than 1.5% of H; the feet never come within 2% of H of it |
+| Sinking, floating | the body goes below the ground by more than 1.5% of H (the fault names the mesh that's lowest: a coat's hem in a crouch isn't the feet); the feet never come within 2% of H of it |
 | Foot slide | a planted foot moves more than 3% of H in one step against the ground. For a clip that walks on the spot, the ground is taken to move back under the feet at the walking pace (the median motion of every planted foot), which is reported as `pace` |
 | Knees, elbows | a knee bends backwards more than 8° or folds past 165°; an elbow backwards more than 12° or past 160°; either bends more than 45° off the hinge it has at rest (the plane its rest pose bends in, carried by the upper bone), which on a skinned mesh twists the joint |
 | Pops | a joint jumps more than 5% of H off its path for one frame and comes back (a foot strike or a fist stopping changes speed once and isn't one); fingers carried by a popping hand aren't listed again |
@@ -76,14 +76,19 @@ Blender is found from `BLENDER`, then the `PATH`, then the usual install folders
   feet turned only about the vertical; the trunk, neck, head and collar taken as matching), and the hips' travel is scaled by
   leg length. So rest poses (T-pose against A-pose), bone rolls and proportions may differ; only the names must match
   (prefixes like `mixamorig:` aside). The clip can be an armature (FBX, BVH, a skinned glTF) or a glTF of animated nodes
-  with no skin; for the latter the rest pose is read from the file itself. Feet aren't planted, so on a body of other
-  proportions they slide a little. `report.json`'s `fit` says how many bones matched.
+  with no skin; for the latter the rest pose is read from the file itself. `report.json`'s `fit` says how many bones matched.
+- **Planting the feet** (on by default; `--no-plant` leaves it out, to see a clip as a plain world-rotation fit plays it).
+  The same knee angles on legs of other proportions reach higher or lower: on Mack, the game's hero, the library's fighting
+  stance put his feet 3.5 cm into the floor. Each frame the hips, and the whole body with them, are moved up or down to put
+  the feet at the clip's height, scaled, the foot that's lower in the clip counting most. Only up and down: moving the body
+  sideways to hold one foot drags the other (that needs IK on each leg), so on a body of other proportions a planted foot
+  still slides a little.
 - **Skeletons with no mesh.** A clip file with only bones, or with only animated nodes (how a glTF clip library with no skin
   imports), is drawn as rods and knots that move with it. Its floor is the clip's own lowest point.
 
 ## Not yet
 
-- Planting the feet (IK) when a fitted clip is played on a body of other proportions.
+- Planting the feet sideways too (IK on each leg) when a fitted clip is played on a body of other proportions.
 - A mesh through itself (a hand through the chest); only one mesh through another is checked.
 - Mesh checks on a model at rest: holes, flipped normals, proportions (hands, head) against a reference.
 - Comparing a model or a clip with a reference side by side.
