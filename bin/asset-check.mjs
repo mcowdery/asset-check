@@ -117,7 +117,7 @@ function blenderRun(script, args, tag) {
 async function sheet(file, out, extra = {}) {
   const o = { ...opts, ...extra };
   const pass = ['--out', out];
-  for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples', 'proportions', 'label']) if (o[k] != null) pass.push(`--${k}`, String(o[k]));
+  for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples', 'proportions', 'label', 'look']) if (o[k] != null) pass.push(`--${k}`, String(o[k]));
   for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list']) if (o[k]) pass.push(`--${k}`);
   await blenderRun(SHEET_PY, [resolve(file), ...pass], 'SHEET ');
   const reportPath = join(out, 'report.json');

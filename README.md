@@ -66,6 +66,9 @@ node bin/asset-check.mjs compare model.glb model.glb --anim old_clips.glb --anim
 node bin/asset-check.mjs blender                                   # which Blender it uses
 ```
 
+`--look "x,y,z,r;..."` renders close-ups of given points (a floating piece's `centre` from `report.json`, say) from the
+front, from their own side and from above, to see what a fault is before acting on it.
+
 Options: `--out <dir>`, `--frames <n>` (12 a strip), `--size <px>` (512), `--engine eevee|cycles`, `--front auto|-y|+y|-x|+x`,
 `--model` / `--no-model` / `--no-anims`, `--verbose` (Blender's own output).
 

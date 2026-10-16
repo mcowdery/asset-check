@@ -51,7 +51,9 @@ few clips takes seconds to a minute; `--clip all` on a big library is heavy: in 
 The model at rest (any file with a mesh; `check` runs these too):
 
 - **pieces floating off the figure**: a small separate bit with nothing near it: a stray clump at a hairline, a hand below
-  its cuff with a gap at the wrist. The fault gives the mesh and the height; find it in `model_close.png`.
+  its cuff with a gap at the wrist. `report.json`'s `floating` gives each piece's `centre`; look at it with
+  `--look "x,y,z,r"` (close-ups from the front, its side and above) before calling it debris: a piece sitting just off on
+  purpose (an epaulette, a belt's end) is a detail.
 - **edges on more than two faces, flipped normals, faces with no area, vertices no bone moves, more than 4 bones**: mesh and
   skinning faults that show as holes, black patches, or parts left behind when the figure moves.
 - **a proportion outside a person's range**: hands first (swollen hands show as palm thickness and width), then feet, arms,

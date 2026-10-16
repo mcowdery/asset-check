@@ -17,6 +17,7 @@ directly:
   --list          print the clips and stop
   --no-plant      fit an --anim clip without planting the feet (see Fit.pose)
   --proportions none   leave out the human proportions check (a stylised figure)
+  --look "x,y,z,r;..."  close-ups of points (a fault's place from report.json), from the front, its side and above
   --checks-only   measure each clip, draw nothing (no model sheets, no strips); --no-checks draw only
 
 Writes into the out folder: model_lit.png and model_clay.png (six sides each), model_close.png (head, hands, feet, and the
@@ -1611,7 +1612,8 @@ def model_checks():
             if gap > gap_limit:
                 c = arrs[o.name][piece].mean(0)
                 floating.append({'mesh': o.name, 'vertices': len(piece), 'gap': round(gap, 4),
-                                 'at_height': round(float((c[2] - GROUND_Z) / H), 3)})
+                                 'at_height': round(float((c[2] - GROUND_Z) / H), 3),
+                                 'centre': [round(float(x), 4) for x in c], 'piece': k})
     floating.sort(key=lambda f: -f['gap'])
     res['floating'] = floating[:40]
     for f in floating[:6]:
@@ -1645,6 +1647,27 @@ def model_checks():
 
 if ARGS['checks'] and not STICK:
     REPORT['model']['checks'] = model_checks()
+def look_sheets(spec):
+    """Close-ups of given points (x,y,z,r in the report's coordinates, several split by ';'): a fault's place looked at
+    from the front, from its own side and from above, lit, r the radius to frame."""
+    play(None)
+    engine('lit')
+    size = ARGS['size']
+    for i, one in enumerate(s for s in spec.split(';') if s.strip()):
+        x, y, z, *rest = (float(v) for v in one.split(','))
+        r = rest[0] if rest else 0.05 * H
+        c = Vector((x, y, z))
+        box = np.array([[x + dx * r, y + dy * r, z + dz * r] for dx in (-1, 1) for dy in (-1, 1) for dz in (-1, 1)])
+        side = 90 if (c - CENTRE).dot(RIGHT) > 0 else 270
+        paths = []
+        for name, az, el in (('front', 0, 8), ('side', side, 8), ('above', side * 0.4, 40)):
+            fit_perspective(box, view_dir(az, el), c, fov=30, margin=1.0, size=size)
+            paths.append(render(f'look{i}_{name}', f'{x:.3f},{y:.3f},{z:.3f} · {name}', size))
+        tile(paths, 3, f'look_{i}')
+
+
+if ARGS.get('look'):
+    look_sheets(ARGS['look'])
 if ARGS['model'] if ARGS['model'] is not None else not STICK:
     model_sheets()
 if ARGS['anims']:
