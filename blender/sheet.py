@@ -16,6 +16,7 @@ directly:
   --model         the model sheets even for a skeleton drawn as sticks; --no-model never; --no-anims no strips
   --list          print the clips and stop
   --no-plant      fit an --anim clip without planting the feet (see Fit.pose)
+  --proportions none   leave out the human proportions check (a stylised figure)
   --checks-only   measure each clip, draw nothing (no model sheets, no strips); --no-checks draw only
 
 Writes into the out folder: model_lit.png and model_clay.png (six sides each), model_close.png (head, hands, feet, and the
@@ -1393,8 +1394,256 @@ def check_clip(clip):
     return res
 
 
+# ------------------------------------------------------------------------------------------------------------- model checks
+#
+# The model at rest: its meshes' soundness, bits floating off it, its skinning, and a human figure's proportions. The ranges
+# are an adult's, wide enough for realistic builds and outfits (they were set on MakeHuman figures, hand-built and generated
+# ones); a stylised figure will go outside them on purpose (--proportions none leaves them out).
+
+HUMAN = {  # fraction of the figure's height: (low, high)
+    'hand_length': (0.085, 0.135),    # wrist to the middle fingertip
+    'palm_width': (0.038, 0.065),     # across the knuckles
+    'palm_thickness': (0.009, 0.028), # back of the hand to the palm, mid-palm: swollen hands show here
+    'foot_length': (0.12, 0.19),      # heel to toe, shoes included
+    'arm_length': (0.34, 0.50),       # shoulder joint to the middle fingertip, along the bones
+    'leg_length': (0.42, 0.57),       # hip joint to the floor
+    'shoulder_width': (0.15, 0.30),   # between the shoulder joints
+    'head_height': (0.09, 0.19),      # what the head bone moves, bottom to top
+}
+
+
+def islands(bm):
+    """The vertex indices of each connected piece of a mesh."""
+    seen = [False] * len(bm.verts)
+    out = []
+    for v in bm.verts:
+        if seen[v.index]:
+            continue
+        piece, todo = [], [v]
+        seen[v.index] = True
+        while todo:
+            w = todo.pop()
+            piece.append(w.index)
+            for e in w.link_edges:
+                o = e.other_vert(w)
+                if not seen[o.index]:
+                    seen[o.index] = True
+                    todo.append(o)
+        out.append(piece)
+    return out
+
+
+def extent(values, lo=2, hi=98):
+    return float(np.percentile(values, hi) - np.percentile(values, lo)) if len(values) else 0.0
+
+
+def proportions(arrs):
+    """Measurements of a human figure from its joints and the vertices they move, as fractions of its height."""
+    out = {}
+    pos = {n: joint_pos(n) for n in JOINTS}
+    allp = np.concatenate(list(arrs.values()))
+
+    def region(joint, without=()):
+        masks = region_masks(joint)
+        if without:
+            for o, m in list(masks.items()):
+                drop = np.zeros_like(m)
+                for j in without:
+                    for o2, m2 in region_masks(j).items():
+                        if o2 == o:
+                            drop |= m2
+                masks[o] = m & ~drop
+        pts = [arrs[o][m] for o, m in masks.items() if o in arrs]
+        return np.concatenate(pts) if pts else np.zeros((0, 3))
+
+    for side in 'lr':
+        h = find_joint('hand', side)
+        pts = region(h) if h else np.zeros((0, 3))
+        if len(pts) < 20:
+            continue
+        wrist = np.array(pos[h])
+        kids = JOINTS[h]['children']
+        mid = next((k for k in kids if 'middle' in tokens(k)), None)
+        index = next((k for k in kids if 'index' in tokens(k)), None)
+        pinky = next((k for k in kids if set(tokens(k)) & {'pinky', 'little'}), None)
+        rel = pts - wrist
+        if mid:
+            along = np.array(pos[mid]) - wrist
+        else:  # (no fingers: the hand's longest direction)
+            along = np.linalg.svd(rel - rel.mean(0), full_matrices=False)[2][0]
+            if np.dot(along, rel.mean(0)) < 0:
+                along = -along
+        along /= np.linalg.norm(along)
+        if index and pinky:
+            across = np.array(pos[index]) - np.array(pos[pinky])
+        else:
+            across = np.linalg.svd(rel - rel.mean(0), full_matrices=False)[2][1]
+        across -= along * np.dot(across, along)
+        across /= np.linalg.norm(across)
+        normal = np.cross(along, across)
+        a = rel @ along
+        length = float(np.percentile(a, 99.5))
+        out[f'hand_length_{side}'] = length / H
+        # the palm without the thumb, which at rest lies beside or under it
+        thumb = [k for k in kids if 'thumb' in tokens(k)]
+        rel = (region(h, thumb) if thumb else pts) - wrist
+        a = rel @ along
+        knuckles = (a > 0.40 * length) & (a < 0.50 * length)
+        out[f'palm_width_{side}'] = extent(rel[knuckles] @ across) / H
+        palm = (a > 0.20 * length) & (a < 0.40 * length)
+        out[f'palm_thickness_{side}'] = extent(rel[palm] @ normal) / H
+        out[f'_hand_{side}'] = length
+
+    for side in 'lr':
+        f = find_joint('foot', side)
+        pts = region(f) if f else np.zeros((0, 3))
+        if len(pts) >= 20:
+            fwd = np.array(FRONT)
+            out[f'foot_length_{side}'] = extent(pts @ fwd, 0.5, 99.5) / H
+
+    for side in 'lr':
+        arm = limb(side, ('upperarm', 'arm'))
+        if arm and f'_hand_{side}' in out:  # (along the bones: a rest pose's elbow is often bent)
+            reach = (pos[arm[1]] - pos[arm[0]]).length + (pos[arm[2]] - pos[arm[1]]).length + out[f'_hand_{side}']
+            out[f'arm_length_{side}'] = reach / H
+        leg = limb(side, ('thigh', 'upleg', 'upperleg', 'leg'))
+        if leg:
+            out[f'leg_length_{side}'] = float(pos[leg[0]].z - GROUND_Z) / H
+    al, ar = limb('l', ('upperarm', 'arm')), limb('r', ('upperarm', 'arm'))
+    if al and ar:
+        out['shoulder_width'] = float((pos[al[0]] - pos[ar[0]]).length) / H
+    head = find_joint('head')
+    if head:
+        pts = region(head)
+        if len(pts):
+            out['head_height'] = extent(pts[:, 2], 0.5, 100) / H
+    del allp
+    return {k: round(v, 4) for k, v in out.items() if not k.startswith('_')}
+
+
+def model_checks():
+    import bmesh
+    play(None)
+    arrs = mesh_arrays()
+    faults, res = [], {'meshes': {}}
+    gap_limit = 0.004 * H
+    pieces_of = {}
+    for o in meshes:
+        bm = bmesh.new()
+        bm.from_mesh(o.data)
+        bm.verts.ensure_lookup_table()
+        many = sum(1 for e in bm.edges if len(e.link_faces) > 2)
+        wire = sum(1 for e in bm.edges if not e.link_faces)
+        flipped = sum(1 for e in bm.edges if len(e.link_faces) == 2 and not e.is_contiguous)
+        tiny = sum(1 for f in bm.faces if f.calc_area() < (H * 1e-5) ** 2)
+        loose = sum(1 for v in bm.verts if not v.link_faces)
+        pieces = islands(bm)
+        bm.free()
+        pieces_of[o.name] = pieces
+        info = {'vertices': len(o.data.vertices), 'faces': len(o.data.polygons), 'pieces': len(pieces),
+                'edges_on_3_faces': many, 'wire_edges': wire, 'flipped_neighbours': flipped, 'degenerate_faces': tiny,
+                'loose_vertices': loose}
+        # skinning: what no bone moves, and more than four bones on one vertex (what glTF and most engines take)
+        if ARM and any(m.type == 'ARMATURE' for m in o.modifiers):
+            bones = {i for i, g in enumerate(o.vertex_groups) if g.name in ARM.data.bones}
+            unweighted = over4 = 0
+            for v in o.data.vertices:
+                ws = [g.weight for g in v.groups if g.group in bones and g.weight > 1e-4]
+                if not ws:
+                    unweighted += 1
+                if len(ws) > 4:
+                    over4 += 1
+            info['unweighted_vertices'] = unweighted
+            info['over_4_bones'] = over4
+            if unweighted:
+                faults.append(f'{o.name}: {unweighted} vertices no bone moves (they stay behind when the figure moves)')
+            if over4:
+                faults.append(f'{o.name}: {over4} vertices on more than 4 bones (an engine drops the rest)')
+        if many:
+            faults.append(f'{o.name}: {many} edges shared by more than two faces')
+        if flipped > 0.001 * len(o.data.polygons) + 2:
+            faults.append(f'{o.name}: {flipped} edges between faces facing opposite ways (flipped normals)')
+        if tiny > 0.001 * len(o.data.polygons) + 2:
+            faults.append(f'{o.name}: {tiny} faces with no area')
+        res['meshes'][o.name] = info
+
+    # bits floating off the figure: a small piece with no other surface (of any mesh) within a little way of it
+    from mathutils.bvhtree import BVHTree
+    trees, face_piece = {}, {}
+    for o in meshes:
+        polys = [tuple(p.vertices) for p in o.data.polygons]
+        if not polys:
+            continue
+        trees[o.name] = BVHTree.FromPolygons(arrs[o.name].tolist(), polys)
+        piece_of = np.empty(len(o.data.vertices), dtype=np.int64)
+        for k, piece in enumerate(pieces_of[o.name]):
+            piece_of[piece] = k
+        face_piece[o.name] = [int(piece_of[p[0]]) for p in polys]
+
+    def gap_from(o_name, k, piece):
+        """How far the piece is from any other surface, up to 16 times the limit (None: further)."""
+        sample = piece[:: max(1, len(piece) // 24)]
+        r = gap_limit
+        while r <= 16 * gap_limit:
+            best = None
+            for i in sample:
+                co = Vector(arrs[o_name][i])
+                for name, tree in trees.items():
+                    for hit in tree.find_nearest_range(co, r):
+                        if name == o_name and face_piece[name][hit[2]] == k:
+                            continue
+                        best = hit[3] if best is None else min(best, hit[3])
+            if best is not None:
+                return best
+            r *= 2
+        return None
+
+    floating = []
+    for o in meshes:
+        total = len(o.data.vertices)
+        if o.name not in trees:
+            continue
+        for k, piece in enumerate(pieces_of[o.name]):
+            if len(piece) > max(0.02 * total, 30) or len(piece) > 2000:
+                continue
+            gap = gap_from(o.name, k, piece)
+            gap = 16 * gap_limit if gap is None else gap
+            if gap > gap_limit:
+                c = arrs[o.name][piece].mean(0)
+                floating.append({'mesh': o.name, 'vertices': len(piece), 'gap': round(gap, 4),
+                                 'at_height': round(float((c[2] - GROUND_Z) / H), 3)})
+    floating.sort(key=lambda f: -f['gap'])
+    res['floating'] = floating[:40]
+    if floating:
+        where = ', '.join(f'{f["mesh"]} ({f["vertices"]} vertices, {f["gap"]:.3g} off, at {f["at_height"] * 100:.0f}% of the height)'
+                          for f in floating[:3])
+        faults.append(f'{len(floating)} pieces floating off the figure: {where}{" ..." if len(floating) > 3 else ""}')
+
+    if ARGS.get('proportions', 'human') != 'none' and JOINTS:
+        props = proportions(arrs)
+        res['proportions'] = props
+        for k, v in props.items():
+            key = re.sub(r'_[lr]$', '', k)
+            lo, hi = HUMAN.get(key, (None, None))
+            if lo is not None and not lo <= v <= hi:
+                faults.append(f'{k.replace("_", " ")} is {v * 100:.1f}% of the height (a person: {lo * 100:.1f}–{hi * 100:.1f}%)')
+        for a in ('hand_length', 'palm_width', 'palm_thickness', 'foot_length', 'arm_length'):
+            l, r = props.get(f'{a}_l'), props.get(f'{a}_r')
+            if l and r and abs(l - r) / max(l, r) > 0.08:
+                faults.append(f'{a.replace("_", " ")} differs left to right: {l * 100:.1f}% against {r * 100:.1f}%')
+
+    res['faults'] = faults
+    for f in faults:
+        print(f'SHEET fault model: {f}')
+    if not faults:
+        print('SHEET model: no faults found')
+    return res
+
+
 # --------------------------------------------------------------------------------------------------------------------- run
 
+if ARGS['checks'] and not STICK:
+    REPORT['model']['checks'] = model_checks()
 if ARGS['model'] if ARGS['model'] is not None else not STICK:
     model_sheets()
 if ARGS['anims']:

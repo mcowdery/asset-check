@@ -81,7 +81,7 @@ if (!blender) {
 }
 const out = resolve(opts.out ?? join('asset-check', basename(file, extname(file))));
 const pass = ['--out', out];
-for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples']) if (opts[k] != null) pass.push(`--${k}`, String(opts[k]));
+for (const k of ['anim', 'clip', 'frames', 'size', 'engine', 'front', 'samples', 'proportions']) if (opts[k] != null) pass.push(`--${k}`, String(opts[k]));
 for (const k of ['model', 'no-model', 'no-anims', 'no-checks', 'checks-only', 'no-plant', 'list']) if (opts[k]) pass.push(`--${k}`);
 
 const args = ['-b', '--factory-startup', '--python-exit-code', '1', '--python', SHEET_PY, '--', resolve(file), ...pass];
@@ -109,8 +109,16 @@ child.on('close', (code) => {
   const report = JSON.parse(readFileSync(reportPath, 'utf8'));
   writeFileSync(join(out, 'index.html'), page(report));
   console.log(`\n${join(out, 'index.html')}`);
-  if (report.clips.some((c) => c.checks?.faults?.length)) process.exitCode = 2;
+  if (report.model?.checks?.faults?.length || report.clips.some((c) => c.checks?.faults?.length)) process.exitCode = 2;
 });
+
+function modelChecks(k, esc) {
+  if (!k) return '';
+  const props = Object.entries(k.proportions ?? {});
+  return `<h2>The model at rest</h2>
+${k.faults.length ? `<ul class="faults">${k.faults.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>` : '<p class="ok">No faults found.</p>'}
+${props.length ? `<p class="facts">${props.map(([n, v]) => `${esc(n.replace(/_/g, ' '))} ${(v * 100).toFixed(1)}%`).join(' · ')} of the height</p>` : ''}`;
+}
 
 /** A small line chart as inline SVG: each series is [label, values (null for a gap), colour]. */
 function chart(title, times, series, unit, marks = []) {
@@ -198,6 +206,7 @@ img { display: block; max-width: 100%; margin: 0 0 10px; border-radius: 3px; }
 <h1>${esc(basename(r.file))}</h1>
 <table>${facts.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table>
 ${r.warnings.map((w) => `<p class="warn">${esc(w)}</p>`).join('\n')}
+${modelChecks(m.checks, esc)}
 ${modelSheets.map((s) => `<a href="${esc(s)}"><img src="${esc(s)}" alt="${esc(s)}"></a>`).join('\n')}
 ${clips}
 </body></html>

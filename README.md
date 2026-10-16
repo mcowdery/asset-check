@@ -26,7 +26,16 @@ that travels more than the figure's height is followed by the camera.
 
 ## The checks
 
-Every clip drawn is also measured at every frame (`asset-check check` does only this, in a few seconds a clip, and exits 2
+**The model at rest** (any file with a real mesh):
+
+| Check | Fault when |
+| --- | --- |
+| Mesh soundness | edges shared by more than two faces; neighbouring faces facing opposite ways (flipped normals); faces with no area |
+| Floating pieces | a small separate piece of a mesh with no other surface within 0.4% of H of it: a stray clump at a hairline, a hand that hangs below its cuff with a gap at the wrist |
+| Skinning | vertices no bone moves; vertices on more than four bones |
+| Proportions | a human figure's hand (length, palm width and thickness, the thumb left out), foot, arm, leg, shoulders or head outside an adult's range, or left and right differing by more than 8%. Set on MakeHuman figures, hand-built and generated ones; it caught the swollen hands of a generated figure (palms 3.9% of the height thick against 1.8% for hands that pass). `--proportions none` for a stylised figure |
+
+**Every clip** drawn is also measured at every frame (`asset-check check` does only this, in a few seconds a clip, and exits 2
 if it finds a fault). Thresholds are fractions of the figure's height H, so they hold at any scale; they're in `LIMITS` at the
 top of the checks in `blender/sheet.py`. A fault is something to look at in the strips, not a verdict.
 
@@ -103,5 +112,4 @@ ln -s "<this repo>/skill" ~/.claude/skills/asset-check                          
 
 - Planting the feet sideways too (IK on each leg) when a fitted clip is played on a body of other proportions.
 - A mesh through itself (a hand through the chest); only one mesh through another is checked.
-- Mesh checks on a model at rest: holes, flipped normals, proportions (hands, head) against a reference.
 - Comparing a model or a clip with a reference side by side.

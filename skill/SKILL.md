@@ -46,6 +46,17 @@ few clips takes seconds to a minute; `--clip all` on a big library is heavy: in 
 
 ## What the faults mean
 
+The model at rest (any file with a mesh; `check` runs these too):
+
+- **pieces floating off the figure**: a small separate bit with nothing near it: a stray clump at a hairline, a hand below
+  its cuff with a gap at the wrist. The fault gives the mesh and the height; find it in `model_close.png`.
+- **edges on more than two faces, flipped normals, faces with no area, vertices no bone moves, more than 4 bones**: mesh and
+  skinning faults that show as holes, black patches, or parts left behind when the figure moves.
+- **a proportion outside a person's range**: hands first (swollen hands show as palm thickness and width), then feet, arms,
+  legs, shoulders, head. For a stylised figure pass `--proportions none`.
+
+A clip:
+
 Thresholds are fractions of the figure's height, in `LIMITS` in `blender/sheet.py`. A fault is something to look at, not a
 verdict: confirm it in the pictures, and say which it is.
 
