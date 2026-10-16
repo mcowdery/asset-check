@@ -1,0 +1,10 @@
+{
+  "name": "asset-check",
+  "version": "0.1.0",
+  "description": "Review sheets for 3D models and animations, rendered in headless Blender: lit and plain-shape turnarounds, close-ups of head, hands and feet, and time-stamped frame strips of each clip, for people and AI agents to judge without opening Blender.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "asset-check": "./bin/asset-check.mjs" },
+  "files": ["bin", "blender"],
+  "engines": { "node": ">=18" }
+}
