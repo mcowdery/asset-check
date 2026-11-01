@@ -1,3 +1,5 @@
+> **Moved.** This project now lives in [ai-tools](https://github.com/mcowdery/ai-tools) at [`tools/asset-check`](https://github.com/mcowdery/ai-tools/tree/master/tools/asset-check). This repository is archived and no longer updated.
+
 # asset-check
 
 Review sheets for 3D models and animations, rendered in headless Blender, so that a person, or an AI agent that can see
